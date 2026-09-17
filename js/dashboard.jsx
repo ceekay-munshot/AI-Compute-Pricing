@@ -2658,9 +2658,10 @@ function renderFinProviderRows(rows,series,periods,dim,boundaryIdx){
 // Per-(SKU, period) price resilience signal. For period P it reads the growth
 // at P (P vs P-1) and the growth at P-1 (P-1 vs P-2). Both >= 0 means the
 // price held or rose across two consecutive completed periods → "Stable/up
-// 2Q" (green; the investor-side "for prices NOT to go down is a big deal"
-// read). Otherwise "Falling" — deliberately neutral grey, it is the absence
-// of a resilience signal rather than a bearish call.
+// 2Q"/"2M" (green; the investor-side "for prices NOT to go down is a big
+// deal" read). Both < 0 is "Falling", and one of each is "Mixed" — grey for
+// both, since neither is a resilience signal, but the label no longer claims
+// a direction the two readings do not agree on.
 //
 // Three things this must never do, because each turns a data gap into a
 // confident-looking verdict:
@@ -2716,8 +2717,17 @@ function renderFinResilienceRows(rows,growth,periods,series,partialKey,dim,bound
           if(cqp==null||pqp==null||!isFinite(cqp)||!isFinite(pqp))
             return blank(p.period,"Needs two consecutive completed periods of growth; not available at "+p.label+".",bStyle);
 
+          // "2Q" was hardcoded when this table only had a quarterly view; the
+          // monthly view renders the same badges, so the unit follows the axis.
+          const span=partialKey==="isQTD"?"2Q":"2M";
+          // Three states, not two. The old binary called everything that was
+          // not up-twice "Falling", which labelled a rising period as falling
+          // whenever the period before it happened to dip — B200 read
+          // "Falling" at +2.0% because May was -0.9%. Only both-down is
+          // falling; one up one down is mixed.
           const stable=cqp>=0&&pqp>=0;
-          const label=stable?"Stable/up 2Q":"Falling";
+          const falling=cqp<0&&pqp<0;
+          const label=stable?"Stable/up "+span:falling?"Falling "+span:"Mixed";
           const bg=stable?"#ecfdf5":"#f3f4f6";
           const fg=stable?"#047857":"#6b7280";
           const curCov=finPricedCoverage(cur), priorCov=finPricedCoverage(prior);
@@ -3513,9 +3523,21 @@ function Sparkline({pts,w=80,h=22}){
    button styles, S.card wrapper and footer styling are otherwise unchanged —
    only the title text, the tab list and the footer source line differ.
 ═══════════════════════════════════════════════════════ */
+// LIVE.fetchedAt is a build-time literal ("Apr 11 2026 · 17:45 UTC") baked in
+// when this dashboard was split out of google-dash. Every tab fetches its own
+// data live on mount, so that string was stale for every visitor from the day
+// it was written. This reports when those fetches actually ran — the same
+// clock reading refreshAll already writes when you press Refresh all.
+function nowUtcLabel(){
+  const d=new Date();
+  const datePart=d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric",timeZone:"UTC"});
+  const timePart=String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0");
+  return datePart+" · "+timePart+" UTC";
+}
+
 export default function App(){
   const[tab,setTab]=useState("pricing");
-  const[fetchedAtLabel,setFetchedAtLabel]=useState(LIVE.fetchedAt);
+  const[fetchedAtLabel,setFetchedAtLabel]=useState(nowUtcLabel);
   const[refreshTick,setRefreshTick]=useState(0);
 
   const[allPressed,setAllPressed]=useState(false);
@@ -3529,10 +3551,7 @@ export default function App(){
   function refreshAll(){
     setAllPressed(true);
     setTimeout(()=>setAllPressed(false),180);
-    const d=new Date();
-    const datePart=d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric",timeZone:"UTC"});
-    const timePart=String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0");
-    setFetchedAtLabel(datePart+" · "+timePart+" UTC");
+    setFetchedAtLabel(nowUtcLabel());
     // The tabs manage their own fetches, so there is no panel refresher to call.
     // Bumping the tick changes the React key on the active tab, which remounts
     // it and re-runs every fetch that tab owns — the same effect the panel
@@ -3553,7 +3572,7 @@ export default function App(){
         <div>
           <div style={{fontSize:15,fontWeight:600,color:"#111827"}}>AI Compute Pricing</div>
           <div style={{fontSize:11,color:"#9ca3af",marginTop:2}}>
-            Data fetched {fetchedAtLabel} · refresh buttons call live /api/* endpoints
+            Data loaded {fetchedAtLabel} · refresh buttons call live /api/* endpoints
           </div>
         </div>
         <button onClick={refreshAll} disabled={anyBusy}
