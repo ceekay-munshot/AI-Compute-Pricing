@@ -55,6 +55,35 @@ If a series looks stale, the fix belongs in google-dash. Not here.
 
 ---
 
+## Third-party embeds need root-level asset routes
+
+Both pricing tabs embed a live third-party page through a reverse proxy, and those
+proxies deliberately **do not rewrite URLs** — the embedded page keeps asking our own
+origin for its stylesheets, scripts and payload. That only works if a matching route
+handler exists at the **root** of `functions/`, not under `functions/api/`:
+
+| Route | Serves | Needed by |
+|---|---|---|
+| `functions/_nuxt/[[path]].js` | pricepertoken.com Nuxt JS, CSS, fonts | Model Pricing → Pricing Matrix (default view) |
+| `functions/_payload.json.js` | pricepertoken.com hydration payload | same |
+| `functions/static/[[path]].js` | getdeploying.com CSS, fonts, images, Alpine bundle | GPU Hardware Pricing → Infra Monitoring |
+| `functions/cdn-cgi/[[path]].js` | 204 sink for Cloudflare analytics beacons | both embeds |
+| `functions/ingest/[[path]].js` | 204 sink for PostHog analytics | both embeds |
+
+**These fail silently if missing.** The proxies inject error suppression that swallows
+chunk / hydration / network errors, and an iframe's `onError` cannot fire when the
+document itself returns HTTP 200 — only its sub-resources 404. So there is no error card
+and no Retry button: the embed just renders as raw unstyled HTML with dead controls.
+
+If you ever add another proxied embed, check what origin-relative URLs the upstream page
+requests at runtime. A closed JS *import* graph does not prove a closed *route* graph.
+
+Three root routes in google-dash are deliberately **not** carried over, because the embeds
+that need them are out of scope: `_next/` and `images/` serve the OpenRouter rankings
+embed (AI Adoption tab), and `ppt-api/` serves the pricing-history embed.
+
+---
+
 ## The 2026-07-28 basis change — this is not a bug
 
 getdeploying.com changed its page layout on 2026-07-28. Before that date the
