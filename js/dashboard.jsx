@@ -1377,7 +1377,7 @@ function ModelPricingMatrixTable(){
 /* ═══════════════════════════════════════════════════════
    TAB: Model Pricing
    Two internal subtabs (matches GPU Hardware Pricing's pill bar):
-     1) Pricing Matrix          — existing matrix + signal + history + ppt embed
+     1) Pricing Matrix          — existing matrix + signal + ppt embed
      2) Quality / Value Scatter — live reverse-proxy of sanand0.github.io/llmpricing
 ═══════════════════════════════════════════════════════ */
 function ModelPricingTab(){
@@ -1393,7 +1393,7 @@ function ModelPricingTab(){
       {/* Subtab switcher — same pattern + visual weight as GPU Hardware Pricing */}
       <div style={{display:"flex",gap:4,marginBottom:14,borderBottom:"0.5px solid #e5e7eb",paddingBottom:0}}>
         {[
-          {id:"matrix", label:"Pricing Matrix",          sub:"peer-pair table · signal · history · live ppt embed"},
+          {id:"matrix", label:"Pricing Matrix",          sub:"peer-pair table · signal · live ppt embed"},
           {id:"scatter",label:"Quality / Value Scatter", sub:"ELO × input-token cost · live · sanand0 llmpricing"},
         ].map(t=>{
           const active=subtab===t.id;
@@ -1415,15 +1415,16 @@ function ModelPricingTab(){
   );
 }
 
-/* Pricing Matrix subtab — preserves the existing Model Pricing layout
-   one-for-one (matrix → signal → quarterly history → live ppt embed). */
+/* Pricing Matrix subtab — the existing Model Pricing layout
+   (matrix → signal → live ppt embed). The quarterly history block that used to
+   sit between the signal and the embed now has a tab of its own; see
+   PricingHistoryTab. Nothing else about this subtab changed. */
 function ModelPricingMatrixSubtab(){
   const[err,setErr]=useState(false);
   return(
     <>
       <ModelPricingMatrixTable/>
       <PricingShareSignalBlock/>
-      <ModelPricingHistoryBlock/>
       {err?(
         <div style={{background:"#f9fafb",border:"1px dashed #d1d5db",borderRadius:8,padding:"32px 16px",textAlign:"center"}}>
           <div style={{fontSize:13,color:"#6b7280",fontWeight:500}}>Model pricing embed temporarily unavailable</div>
@@ -3504,24 +3505,105 @@ function Sparkline({pts,w=80,h=22}){
 ═══════════════════════════════════════════════════════ */
 
 /* ═══════════════════════════════════════════════════════
+   TAB: Pricing History
+
+   Hand-written shell, like App() below, holding two pieces that already
+   existed but had no tab of their own:
+
+     - ModelPricingHistoryBlock ("Quarterly Model Pricing by Company"), moved
+       off the Model Pricing tab where it sat between the share signal and the
+       live embed. The block itself is untouched: it takes no props, owns its
+       fetch and its state, and renders exactly as it did there.
+
+     - PPTHistoryIframe, the Open Router Pricing History embed, copied from
+       google-dash js/dashboard.jsx lines 4950-4970 with its render wrapper
+       from 5168-5177. In google-dash that wrapper sits on the AI Adoption tab,
+       which this dashboard does not carry — which is why the original split
+       left the embed behind although its proxy came across. Only the wrapper's
+       indentation changed, to match this shell's nesting.
+
+   The embed reverse-proxies pricepertoken.com/pricing-history through
+   /api/pricepertoken-history-proxy, which rewrites the page's API base to
+   /ppt-api. functions/ppt-api/[[path]].js therefore ships with it: without
+   that route the frame loads a 200 document whose every data call 404s, and
+   the proxy's error suppression means nothing visible reports the failure.
+
+   Two height mechanisms drive the frame — PPTHistoryIframe's own listener and
+   the inline one in index.html. Both compute the same value, and google-dash
+   ships both; the duplication is carried over rather than tidied away.
+═══════════════════════════════════════════════════════ */
+function PPTHistoryIframe(){
+  const [h,setH]=useState(920);
+  useEffect(()=>{
+    function onMsg(e){
+      const d=e&&e.data;
+      if(d&&d.__ppt==="history-height"&&typeof d.height==="number"){
+        setH(Math.max(300,Math.ceil(d.height)));
+      }
+    }
+    window.addEventListener("message",onMsg);
+    return()=>window.removeEventListener("message",onMsg);
+  },[]);
+  return(
+    <iframe
+      src={"/api/pricepertoken-history-proxy?v="+Math.floor(Date.now()/3e5)}
+      title="Open Router Pricing History"
+      loading="lazy"
+      style={{border:0,display:"block",width:"100%",height:h,transition:"height .2s ease"}}
+    />
+  );
+}
+
+function PricingHistoryTab(){
+  return(
+    <>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <Pill text="Pricing History · quarterly by company + pricepertoken.com history" bg="#ecfeff" color="#0e7490"/>
+        </div>
+      </div>
+
+      <ModelPricingHistoryBlock/>
+
+      {/* PricePerToken — Open Router Pricing History embed */}
+      <div style={{marginTop:20,marginBottom:20}}>
+        <div style={{...S.lbl,marginBottom:8}}>Open Router Pricing History</div>
+        <div style={{borderRadius:8,overflow:"hidden",border:"0.5px solid #e5e7eb",background:"#fff"}}>
+          <PPTHistoryIframe/>
+        </div>
+        <div style={{fontSize:10,color:"#9ca3af",marginTop:5}}>
+          Source: pricepertoken.com/pricing-history · reverse-proxied
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
    ROOT
 
-   THIS FUNCTION IS THE SOLE DIVERGENCE FROM google-dash.
+   This function and PricingHistoryTab above are the hand-written parts of this
+   file. Everything else is a byte-for-byte copy of ceekay-munshot/google-dash
+   @ 863c950: its js/dashboard.jsx lines 1-208 and 270-3555, which occupy lines
+   1-208 and 209-3504 here, plus PPTHistoryIframe from its lines 4950-4970 — a
+   second, out-of-range splice taken so the pricing-history embed could come
+   across with the block it belongs to. Nothing was refactored, reformatted or
+   "improved": the pricing tabs must render identically in both dashboards,
+   because they read the same KV store through the same endpoints. If a section
+   looks wrong here, it most likely looks the same way in google-dash, and the
+   fix belongs there first.
 
-   Every other line of this file — and every file under functions/ — is a
-   byte-for-byte copy of ceekay-munshot/google-dash @ 863c950, spliced from
-   lines 1-208 and 270-3555 of its js/dashboard.jsx. Nothing was refactored,
-   reformatted or "improved": the two pricing tabs must render identically in
-   both dashboards, because they read the same KV store through the same
-   endpoints. If a section looks wrong here, it looks the same way in
-   google-dash, and the fix belongs there first.
+   Known exception: the Price Resilience badge wording and this header's
+   fetched-at label were fixed here first. README.md's divergence section
+   records what has moved out of parity and why.
 
    google-dash's App() carried seven tabs plus an Alphabet-specific KPI strip,
    the OpenRouterLiveEmbed hero and OpenRouterProviderRollupChart. Those belong
    to its AI Adoption story, not to price tracking, so this shell drops them and
-   keeps only Model Pricing and GPU Hardware Pricing. The header markup, tab
-   button styles, S.card wrapper and footer styling are otherwise unchanged —
-   only the title text, the tab list and the footer source line differ.
+   keeps Model Pricing, GPU Hardware Pricing and Pricing History. The header
+   markup, tab button styles, S.card wrapper and footer styling are otherwise
+   unchanged — only the title text, the tab list and the footer source line
+   differ.
 ═══════════════════════════════════════════════════════ */
 // LIVE.fetchedAt is a build-time literal ("Apr 11 2026 · 17:45 UTC") baked in
 // when this dashboard was split out of google-dash. Every tab fetches its own
@@ -3562,6 +3644,7 @@ export default function App(){
   const TABS=[
     {id:"pricing", label:"Model Pricing"},
     {id:"gpu",     label:"GPU Hardware Pricing"},
+    {id:"history", label:"Pricing History"},
   ];
 
   return(
@@ -3596,6 +3679,13 @@ export default function App(){
       <div style={S.card}>
         {tab==="pricing"&&<ModelPricingTab key={"pricing-"+refreshTick}/>}
         {tab==="gpu"&&<GPUHardwarePricingTab key={"gpu-"+refreshTick}/>}
+        {/* Keyed like the other two, so Refresh all remounts it and
+            ModelPricingHistoryBlock re-runs its build-hash-keyed fetch. The
+            cost is that the embed's measured height resets to its 920 default
+            on refresh; the proxy re-posts height on load and at 500/1500/3000ms
+            (functions/api/pricepertoken-history-proxy.js), so it regrows within
+            a few seconds. google-dash never remounts it — it keys no tab. */}
+        {tab==="history"&&<PricingHistoryTab key={"history-"+refreshTick}/>}
       </div>
 
       {/* Footer */}

@@ -4,24 +4,88 @@ A standalone Cloudflare Pages dashboard for tracking the price of AI compute:
 what a million tokens costs across frontier models, and what a GPU-hour costs
 across the hardware those models run on.
 
-It is a **direct copy** of the two pricing sections of
+It began as a **direct copy** of the pricing sections of
 [`ceekay-munshot/google-dash`](https://github.com/ceekay-munshot/google-dash)
 (at commit `863c950`), lifted out so price tracking has its own home instead of
-sitting behind five other tabs. The UI, the sorting, the tooltips and the copy
-are unchanged, and it reads the same data store — so the two dashboards show
-identical numbers.
+sitting behind five other tabs. It reads the same data store, so the two
+dashboards show identical numbers. The UI, sorting, tooltips and copy are
+unchanged except where [Divergence from google-dash](#divergence-from-google-dash)
+says otherwise.
 
 ---
 
-## The two tabs
+## The three tabs
 
 **Model Pricing** — the full model pricing table, the frontier
-price-per-1M-tokens reference view, the peer matrix, the market-share signal,
-and the average `$`/1M tokens block with its *Model-day weight* vs *Usage
-weighted* toggle, its *Avg / QoQ / YoY* views, and input and output split out.
+price-per-1M-tokens reference view, the peer matrix and the market-share
+signal, plus the *Quality / Value Scatter* subtab.
 
-**GPU Hardware Pricing** — `$`/GPU-hour month-on-month by GPU model, with both
+**GPU Hardware Pricing** — `# AI Compute Pricing
+
+A standalone Cloudflare Pages dashboard for tracking the price of AI compute:
+what a million tokens costs across frontier models, and what a GPU-hour costs
+across the hardware those models run on.
+
+It began as a **direct copy** of the pricing sections of
+[`ceekay-munshot/google-dash`](https://github.com/ceekay-munshot/google-dash)
+(at commit `863c950`), lifted out so price tracking has its own home instead of
+sitting behind five other tabs. It reads the same data store, so the two
+dashboards show identical numbers. The UI, sorting, tooltips and copy are
+unchanged except where [Divergence from google-dash](#divergence-from-google-dash)
+says otherwise.
+
+---
+
+/GPU-hour month-on-month by GPU model, with both
 subtabs: *Financial Correlation* and *Infra Monitoring*.
+
+**Pricing History** — *Quarterly Model Pricing by Company*, the average `# AI Compute Pricing
+
+A standalone Cloudflare Pages dashboard for tracking the price of AI compute:
+what a million tokens costs across frontier models, and what a GPU-hour costs
+across the hardware those models run on.
+
+It began as a **direct copy** of the pricing sections of
+[`ceekay-munshot/google-dash`](https://github.com/ceekay-munshot/google-dash)
+(at commit `863c950`), lifted out so price tracking has its own home instead of
+sitting behind five other tabs. It reads the same data store, so the two
+dashboards show identical numbers. The UI, sorting, tooltips and copy are
+unchanged except where [Divergence from google-dash](#divergence-from-google-dash)
+says otherwise.
+
+---
+
+/1M
+tokens block with its *Model-day weight* vs *Usage weighted* toggle, its *Avg /
+QoQ / YoY* views and input/output split out; below it the reverse-proxied
+pricepertoken.com/pricing-history chart. The quarterly block used to sit on
+Model Pricing between the share signal and the live embed; the chart is new
+here, carried over from google-dash's AI Adoption tab where it has always
+lived. Neither was modified in the move.
+
+---
+
+## Divergence from google-dash
+
+The rule elsewhere in this README — *a fix belongs in google-dash first* — still
+holds for anything touching how a number is computed. These are the places this
+repo has deliberately moved first, and they are all presentation:
+
+- **The Pricing History tab.** google-dash has no such tab; its quarterly block
+  sits on Model Pricing and its pricing-history chart sits on AI Adoption. Both
+  components are carried over unmodified, only re-parented. Porting this back
+  would mean adding a tab google-dash does not want.
+- **The Price Resilience badge** on GPU → Financial Correlation reads
+  *Stable/up* · *Mixed* · *Falling* where google-dash reads only *Stable/up* or
+  *Falling*, and its period unit follows the month/quarter axis instead of
+  always saying `2Q`. google-dash labelled a rising period "Falling" whenever
+  the period before it dipped.
+- **The header's fetched-at label** is generated at load instead of read from a
+  build-time literal that had gone five months stale.
+
+**Data and endpoints have not diverged in behaviour.** The three write-path
+removals listed above are still the only backend differences, and
+`functions/ppt-api/[[path]].js` is copied from google-dash unchanged.
 
 ---
 
@@ -57,30 +121,36 @@ If a series looks stale, the fix belongs in google-dash. Not here.
 
 ## Third-party embeds need root-level asset routes
 
-Both pricing tabs embed a live third-party page through a reverse proxy, and those
-proxies deliberately **do not rewrite URLs** — the embedded page keeps asking our own
-origin for its stylesheets, scripts and payload. That only works if a matching route
+All three tabs embed a live third-party page through a reverse proxy, and those
+proxies deliberately **do not rewrite URLs** for assets — the embedded page keeps
+asking our own origin for its stylesheets, scripts and payload. That only works if a matching route
 handler exists at the **root** of `functions/`, not under `functions/api/`:
 
 | Route | Serves | Needed by |
 |---|---|---|
-| `functions/_nuxt/[[path]].js` | pricepertoken.com Nuxt JS, CSS, fonts | Model Pricing → Pricing Matrix (default view) |
+| `functions/_nuxt/[[path]].js` | pricepertoken.com Nuxt JS, CSS, fonts | Model Pricing → Pricing Matrix (default view) **and** Pricing History |
 | `functions/_payload.json.js` | pricepertoken.com hydration payload | same |
 | `functions/static/[[path]].js` | getdeploying.com CSS, fonts, images, Alpine bundle | GPU Hardware Pricing → Infra Monitoring |
-| `functions/cdn-cgi/[[path]].js` | 204 sink for Cloudflare analytics beacons | both embeds |
-| `functions/ingest/[[path]].js` | 204 sink for PostHog analytics | both embeds |
+| `functions/ppt-api/[[path]].js` | api.pricepertoken.com JSON for the pricing-history chart | Pricing History → Open Router Pricing History |
+| `functions/cdn-cgi/[[path]].js` | 204 sink for Cloudflare analytics beacons | all three embeds |
+| `functions/ingest/[[path]].js` | 204 sink for PostHog analytics | all three embeds |
 
-**These fail silently if missing.** The proxies inject error suppression that swallows
-chunk / hydration / network errors, and an iframe's `onError` cannot fire when the
-document itself returns HTTP 200 — only its sub-resources 404. So there is no error card
-and no Retry button: the embed just renders as raw unstyled HTML with dead controls.
+**These fail silently if missing**, and worse than a 404. The proxies inject error
+suppression that swallows chunk / hydration / network errors, and an iframe's `onError`
+cannot fire when the document itself returns HTTP 200. A missing root route does not even
+404: Pages falls back to serving `index.html`, so the request returns **HTTP 200 with the
+dashboard's own HTML in it** — an XHR expecting JSON throws in `JSON.parse` and the
+suppression eats it. Measured on `/ppt-api/*` before its handler existed: 200, 384 KB,
+the SPA shell. So there is no error card and no Retry button: the embed renders as raw
+unstyled HTML with dead controls, or silently empty charts.
 
 If you ever add another proxied embed, check what origin-relative URLs the upstream page
 requests at runtime. A closed JS *import* graph does not prove a closed *route* graph.
 
-Three root routes in google-dash are deliberately **not** carried over, because the embeds
-that need them are out of scope: `_next/` and `images/` serve the OpenRouter rankings
-embed (AI Adoption tab), and `ppt-api/` serves the pricing-history embed.
+Two root routes in google-dash are deliberately **not** carried over, because the embed
+that needs them is out of scope: `_next/` and `images/` serve the OpenRouter rankings
+embed (AI Adoption tab). `ppt-api/` was on that list until the Pricing History tab
+landed — it serves the pricing-history chart and is now required.
 
 ---
 
@@ -154,7 +224,7 @@ be re-spliced into `index.html` and committed alongside the `.jsx` change:
 npm install
 npm run build        # re-splice the bundle into index.html
 npm run build:check  # must print "index.html is up to date"
-npm test             # 24/24
+npm test             # 32/32
 ```
 
 `npm run build:check` is deterministic, so it is a reliable staleness guard.
@@ -164,15 +234,19 @@ Run it before every commit.
 
 ```
 functions/api/     Cloudflare Pages Functions — the read-only API, over KV
+functions/ppt-api/ root-level proxy for the pricing-history chart's own API
 js/dashboard.jsx   the only React source (React 19 + Recharts)
 js/.dashboard-entry.jsx  mounts it
 index.html         committed pre-built artifact — regenerate, never hand-edit
 scripts/build-dashboard.mjs  the splicer
 ```
 
-`js/dashboard.jsx` is google-dash's lines 1-208 and 270-3555, spliced verbatim.
-The only hand-written code in this repo is the two-tab `App()` at the end of
-that file, and it carries a header comment saying exactly that.
+`js/dashboard.jsx` is google-dash's lines 1-208 and 270-3555 spliced verbatim —
+they occupy lines 1-208 and 209-3504 here — plus `PPTHistoryIframe` from its
+lines 4950-4970, a second out-of-range splice taken so the pricing-history chart
+could travel with the block it belongs to. The hand-written code is `App()` and
+`PricingHistoryTab` at the end of that file; both carry header comments saying
+so. See [Divergence from google-dash](#divergence-from-google-dash).
 
 ### Deliberately not built yet
 
