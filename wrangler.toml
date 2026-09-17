@@ -1,0 +1,51 @@
+# ai-compute-pricing — Cloudflare Pages project configuration
+#
+# ─────────────────────────────────────────────────────────────────────
+# SHARED KV — THIS DASHBOARD IS A READ-ONLY CONSUMER
+#
+# HISTORY_KV below is google-dash's namespace, bound here deliberately and
+# unchanged. This dashboard does not build its own history: it reads the
+# series google-dash has been capturing since 2026-04-21, so both dashboards
+# show the same numbers on the same day and can never drift apart.
+#
+# google-dash is the SOLE WRITER. Two deployments writing one namespace
+# corrupts `index:days` and breaks BOTH dashboards, so every write path in
+# the copied endpoints has been removed here:
+#   - /api/gpu-hardware-pricing-history-refresh  — not deployed at all
+#   - /api/openrouter-model-usage                — read-through capture disabled
+#   - /api/openrouter-chart-weekly               — POST ?capture=1 removed
+# There are no capture scripts, cron triggers, scheduled workers, seed files
+# or backfills in this repo, and no .github/workflows directory. If a series
+# looks stale, the fix belongs in google-dash, not here.
+#
+# Same namespace for production and preview (preview_id === id) so preview
+# deploys see the same store as production. Leaving preview unbound makes
+# /api/gpu-hardware-pricing-history's `env?.HISTORY_KV` guard show the
+# "Quarter service temporarily unavailable" banner on preview deploys.
+# ─────────────────────────────────────────────────────────────────────
+
+name = "ai-compute-pricing"
+compatibility_date = "2024-09-23"
+
+# Required by Cloudflare Pages v2 build strategy. Without this property Pages
+# logs "A Wrangler configuration file was found but it does not appear to be
+# valid. … Skipping file and continuing." and silently ignores the entire
+# file. index.html is a committed, pre-built single-file artifact and there is
+# no build step, so the output dir is "./".
+pages_build_output_dir = "./"
+
+[[kv_namespaces]]
+binding = "HISTORY_KV"
+id = "322b0ca12e874e6a8568126e182e59f5"
+preview_id = "322b0ca12e874e6a8568126e182e59f5"
+
+# ─────────────────────────────────────────────────────────────────────
+# NO D1 DATABASE
+#
+# google-dash carries a [[d1_databases]] block binding EC2_PRICING_DB for its
+# AWS EC2 pricing time-series, plus a migrations/ directory. None of that is
+# carried over: the Amazon / EC2 / Spot sections are out of scope here, and
+# nothing in the two pricing tabs reads D1. Adding a binding for an unused
+# database would only risk the Cloudflare Pages failure mode where an invalid
+# or placeholder UUID silently freezes deploys at an older build.
+# ─────────────────────────────────────────────────────────────────────
