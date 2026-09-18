@@ -350,7 +350,7 @@ function PricingSharePartialView({ header, quarter }){
       <div style={{display:"flex",flexWrap:"wrap",gap:"4px 10px",fontSize:10,color:"#6b7280",marginTop:8,lineHeight:1.5}}>
         <span><b style={{color:"#374151"}}>Scope:</b> partial view — Price QoQ shown, Share QoQ unavailable until a prior-quarter KV snapshot exists</span>
         <span>·</span>
-        <span><b style={{color:"#374151"}}>Sources:</b> pricepertoken provider pricing history + canonical HISTORY_KV OpenRouter snapshots</span>
+        <span><b style={{color:"#374151"}}>Sources:</b> pricepertoken provider pricing history + OpenRouter snapshots</span>
       </div>
     </div>
   );
@@ -412,7 +412,6 @@ function PricingShareSignalBlock(){
         {header}
         <div style={{background:"#fff",border:"0.5px dashed #fca5a5",borderRadius:10,padding:"14px 16px"}}>
           <div style={{fontSize:12,color:"#991b1b",fontWeight:500}}>Pricing / share read-through temporarily unavailable</div>
-          <div style={{fontSize:11,color:"#6b7280",marginTop:2}}>{state.error||"/api/pricing-share-signal did not return success"}</div>
         </div>
       </div>
     );
@@ -612,7 +611,7 @@ function PricingShareSignalBlock(){
         <span>·</span>
         <span><b style={{color:"#374151"}}>Omissions:</b> providers outside the OpenRouter top-N during the quarter are excluded, never imputed</span>
         <span>·</span>
-        <span><b style={{color:"#374151"}}>Sources:</b> pricepertoken provider pricing history + canonical HISTORY_KV OpenRouter snapshots</span>
+        <span><b style={{color:"#374151"}}>Sources:</b> pricepertoken provider pricing history + OpenRouter snapshots</span>
       </div>
     </div>
   );
@@ -745,7 +744,6 @@ function ModelPricingHistoryBlock(){
       {state.phase==="error"?(
         <div style={{background:"#fff",border:"0.5px dashed #fca5a5",borderRadius:10,padding:"20px 16px",textAlign:"center"}}>
           <div style={{fontSize:13,color:"#991b1b",fontWeight:500,marginBottom:4}}>Provider-grouped pricing history temporarily unavailable</div>
-          <div style={{fontSize:11,color:"#6b7280"}}>{state.error||"/api/provider-pricing-matrix did not return success"}</div>
         </div>
       ):state.phase==="loading"?(
         <div style={{...S.card}}><Shimmer rows={5}/></div>
@@ -1012,7 +1010,6 @@ function ModelPricingMatrixTable(){
       <div style={{marginBottom:16}}>{header}
         <div style={{background:"#fff",border:"0.5px dashed #fca5a5",borderRadius:10,padding:"14px 16px"}}>
           <div style={{fontSize:12,color:"#991b1b",fontWeight:500}}>Pricing matrix temporarily unavailable</div>
-          <div style={{fontSize:11,color:"#6b7280",marginTop:2}}>{state.error||"/api/model-pricing-peer-matrix did not return success"}</div>
         </div>
       </div>
     );
@@ -1260,112 +1257,6 @@ function ModelPricingMatrixTable(){
           </div>
         </div>
       )}
-
-      {/* Representative Model Check — compact investor-facing strip. The
-         detailed per-rep diagnostics live behind a "Show diagnostics" toggle
-         and are intentionally collapsed by default. Pricing math never reads
-         this section; reps are never auto-promoted. */}
-      {externalCatalog&&(()=>{
-        const counts=reps.reduce((acc,r)=>{
-          const s=r.repFreshness?.status||"OK";
-          acc[s]=(acc[s]||0)+1;
-          return acc;
-        },{});
-        const monitored=reps.length;
-        const critical=counts.STALE||0;
-        const review  =counts.REVIEW||0;
-        const watch   =counts.WATCH||0;
-        const ok      =counts.OK||0;
-        const fcLabel = !externalCatalog.enabled ? "Not configured in this environment"
-                      : externalCatalog.degraded ? "Degraded"
-                      : "Live";
-        const fcBg    = !externalCatalog.enabled ? "#f3f4f6"
-                      : externalCatalog.degraded ? "#fef3c7"
-                      : "#ecfdf5";
-        const fcFg    = !externalCatalog.enabled ? "#6b7280"
-                      : externalCatalog.degraded ? "#92400e"
-                      : "#047857";
-        const lastChecked = externalCatalog.generatedAt
-          ? new Date(externalCatalog.generatedAt).toLocaleString(undefined,{dateStyle:"medium",timeStyle:"short"})
-          : null;
-        const summaryParts=[
-          monitored+" mappings monitored",
-          critical+" critical",
-          (review+watch)+" watch",
-        ];
-        return(
-          <div style={{marginTop:12,marginBottom:6,border:"0.5px solid #e5e7eb",borderRadius:8,padding:"10px 12px",background:"#fafafa"}}>
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
-              <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-                <div style={{fontSize:11,fontWeight:700,color:"#374151"}}>Representative Model Check</div>
-                <span style={{fontSize:10,fontWeight:500,padding:"2px 7px",borderRadius:3,background:fcBg,color:fcFg}}>Firecrawl: {fcLabel}</span>
-                <span style={{fontSize:10,color:"#6b7280"}}>Price source: <b style={{color:"#374151",fontWeight:600}}>pricepertoken historical API</b></span>
-                <span style={{fontSize:10,color:"#6b7280"}}>·</span>
-                <span style={{fontSize:10,color:"#6b7280"}}>{summaryParts.join(" · ")}</span>
-                {lastChecked&&<>
-                  <span style={{fontSize:10,color:"#6b7280"}}>·</span>
-                  <span style={{fontSize:10,color:"#9ca3af"}}>checked {lastChecked}</span>
-                </>}
-              </div>
-              <button onClick={()=>setDiagOpen(o=>!o)}
-                style={{fontSize:10,padding:"3px 10px",border:"0.5px solid #d1d5db",borderRadius:4,background:"#fff",color:"#374151",cursor:"pointer",fontFamily:"inherit",fontWeight:500}}>
-                {diagOpen?"Hide diagnostics":"Show diagnostics"}
-              </button>
-            </div>
-            <div style={{fontSize:10,color:"#9ca3af",marginTop:6,lineHeight:1.4}}>Fixed reps are not auto-rotated; review signals are advisory.</div>
-            {diagOpen&&(
-              <div style={{marginTop:10,border:"0.5px solid #e5e7eb",borderRadius:6,overflow:"hidden",background:"#fff"}}>
-                <div style={{overflowX:"auto"}}>
-                  <table style={{width:"100%",borderCollapse:"separate",borderSpacing:0,fontSize:11,background:"#fff"}}>
-                    <thead>
-                      <tr>
-                        <th style={{textAlign:"left",padding:"6px 10px",fontSize:10,color:"#6b7280",fontWeight:600,whiteSpace:"nowrap",background:"#f3f4f6"}}>Rep</th>
-                        <th style={{textAlign:"left",padding:"6px 10px",fontSize:10,color:"#6b7280",fontWeight:600,whiteSpace:"nowrap",background:"#f3f4f6"}}>Status</th>
-                        <th style={{textAlign:"left",padding:"6px 10px",fontSize:10,color:"#6b7280",fontWeight:600,background:"#f3f4f6"}}>Pricepertoken signal</th>
-                        <th style={{textAlign:"left",padding:"6px 10px",fontSize:10,color:"#6b7280",fontWeight:600,background:"#f3f4f6"}}>External docs signal</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {reps.map(rep=>{
-                        const fr=rep.repFreshness||{status:"OK",ppEvidence:{newerStable:[],newerLimited:[]},firecrawlEvidence:{enabled:false,possibleNewerModels:[]}};
-                        const statusBg=fr.status==="STALE"?"#fef2f2":fr.status==="REVIEW"?"#fef3c7":fr.status==="WATCH"?"#eff6ff":"#f3f4f6";
-                        const statusFg=fr.status==="STALE"?"#991b1b":fr.status==="REVIEW"?"#78350f":fr.status==="WATCH"?"#1d4ed8":"#374151";
-                        const ppAll=[...(fr.ppEvidence?.newerStable||[]),...(fr.ppEvidence?.newerLimited||[])];
-                        const fcModels=fr.firecrawlEvidence?.possibleNewerModels||[];
-                        return(
-                          <tr key={"fresh-"+rep.key} style={{borderTop:"0.5px solid #e5e7eb"}}>
-                            <td style={{padding:"6px 10px",whiteSpace:"nowrap",verticalAlign:"top"}}>
-                              <div style={{fontWeight:600,color:"#111827"}}>{rep.label}</div>
-                              <div style={{fontSize:10,color:"#9ca3af",fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>{rep.modelDisplay}</div>
-                            </td>
-                            <td style={{padding:"6px 10px",whiteSpace:"nowrap",verticalAlign:"top"}}>
-                              <span style={{fontSize:10,fontWeight:600,padding:"2px 7px",borderRadius:3,background:statusBg,color:statusFg}}>{fr.status}</span>
-                            </td>
-                            <td style={{padding:"6px 10px",fontSize:10,color:"#374151",verticalAlign:"top"}}>
-                              {ppAll.length===0
-                                ? <span style={{color:"#9ca3af"}}>—</span>
-                                : <span title={ppAll.map(e=>e.model+" ("+e.obs+" obs)").join(", ")}>
-                                    {ppAll.slice(0,2).map(e=>e.model).join(", ")}{ppAll.length>2?` +${ppAll.length-2}`:""}
-                                  </span>}
-                            </td>
-                            <td style={{padding:"6px 10px",fontSize:10,color:"#374151",verticalAlign:"top"}}>
-                              {!fr.firecrawlEvidence?.enabled
-                                ? <span style={{color:"#9ca3af"}}>External docs check unavailable</span>
-                                : fcModels.length===0
-                                  ? <span style={{color:"#059669"}}>none</span>
-                                  : <span title={fcModels.join(", ")}>{fcModels.slice(0,3).join(", ")}{fcModels.length>3?` +${fcModels.length-3}`:""}</span>}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </div>
-        );
-      })()}
 
       <div style={{fontSize:10,color:"#9ca3af",lineHeight:1.5,marginTop:6}}>
         <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> Prices use pricepertoken historical model-level rows, averaged by {G.bucketWord} and shown as $/1M tokens. {G.chgLabel}/YoY compare only valid full historical periods; {G.partialBadge} growth is suppressed. Fixed representative models keep growth math comparable; the Frontier Reference shows how the latest frontier label — and its price — change by period. Alternate-billing SKUs (<code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:batch</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:beta</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:thinking</code>) and sibling product lines (GPT-5 Pro vs GPT-5, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>-customtools</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>-fast</code>) are excluded from every average — each would otherwise register as a price move when only the upstream catalog changed. Firecrawl is used only as an advisory model-discovery signal, never for pricing math.
@@ -2300,7 +2191,7 @@ function GPUFinancialCorrelationBlock({fHist,fHistErr}){
         <div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"14px 16px"}}>
           <div style={{fontSize:12,color:"#111827",fontWeight:500}}>Matrix populates as real daily snapshots accumulate</div>
           <div style={{fontSize:11,color:"#6b7280",marginTop:3}}>
-            This view will show one column per calendar {effMode==="quarter"?"quarter":"month"} and include QoQ/MoM + YoY growth rows once enough real data exists. Flip the <b>Illustrative</b> toggle above to preview the full-matrix layout with non-live placeholder values.
+            This view will show one column per calendar {effMode==="quarter"?"quarter":"month"} and include QoQ/MoM + YoY growth rows once enough real data exists.
           </div>
         </div>
       ):(
@@ -2334,7 +2225,7 @@ function GPUFinancialCorrelationBlock({fHist,fHistErr}){
                       badgeTitle="No GPU capture recorded for "+p.label+".";
                     }else if(!anyPriced){
                       badge="no price";badgeColor="#b45309";
-                      badgeTitle=p.label+" was captured but the feed returned no minPricePerHour, so every price cell is blank.";
+                      badgeTitle=p.label+" was captured but the feed returned no price, so every price cell is blank.";
                     }else if(running){
                       badge=effMode==="quarter"?"QTD":"MTD";
                       badgeTitle=p.label+" is still in progress — growth and resilience are suppressed for it.";
@@ -2431,32 +2322,6 @@ function GPUFinancialCorrelationBlock({fHist,fHistErr}){
       {/* Methodology footnote — concise, customer-spec wording. */}
       <div style={{fontSize:10,color:"#9ca3af",lineHeight:1.5,marginTop:6}}>
         <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> GPU prices are real daily observations averaged by SKU and calendar period — no estimates, no backfill. <b style={{color:"#6b7280",fontWeight:600}}>What the source publishes changed mid-history</b>, so a period carries one of two measures: through {basisChangeDate?"2026-07-27":"the earlier periods"} a per-vendor min–max range, of which the <b style={{color:"#6b7280",fontWeight:600}}>floor</b> (the single cheapest listing among ~50 providers) is shown; from {basisChangeDate||"the later periods"} a single <b style={{color:"#6b7280",fontWeight:600}}>median</b> across providers. The two are different statistics and their levels are not comparable — the floor is volatile and one outlier listing moves it, which is why it sits far below the median. A period that straddles the change takes the measure covering most of its days and averages only those days; its tooltip names the other measure and what it averaged. Growth is computed only between periods sharing a measure and only between completed periods; a period still in progress (QTD/MTD) is suppressed, and a cell spanning the change reads <span style={{color:"#b45309",fontWeight:600}}>measure changed</span> rather than a fabricated percentage. A <sup style={{color:"#b45309",fontWeight:700}}>&deg;</sup> marks a value resting on a period where under {Math.round(FIN_LOW_COVERAGE*100)}% of days carry a price. The column axis is continuous, so a period with no capture stays visible as an empty column. GPU prices are not summed, because there is no meaningful total price across SKUs. Provider count shows observed vendor breadth where available. Stable or rising prices in older GPUs can indicate tight supply or strong ROI.
-      </div>
-
-      {/* Internal diagnostics — illustrative-data toggle lives here so it
-         never appears in the customer-facing main view by default. Off by
-         default; intended for layout/QA preview only. */}
-      <div style={{marginTop:8}}>
-        <button onClick={()=>setDiagOpen(o=>!o)}
-          style={{fontSize:10,padding:"3px 10px",border:"0.5px solid #d1d5db",borderRadius:4,background:"#fff",color:"#6b7280",cursor:"pointer",fontFamily:"inherit",fontWeight:500}}>
-          {diagOpen?"Hide diagnostics":"Show diagnostics"}
-        </button>
-        {diagOpen&&(
-          <div style={{marginTop:8,padding:"10px 12px",border:"0.5px dashed #d1d5db",borderRadius:6,background:"#fafafa",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-            <div style={{width:"100%"}}>
-              <span style={{fontSize:10,color:"#6b7280"}}>Internal-only — does not affect the live customer-facing view.</span>
-            </div>
-            {/* Feed health lives here, not in the main view: an operator needs
-                to know the moment a capture stalls, but a red alert across the
-                top of the matrix reads to a customer as "this product is
-                broken". The column markers below already tell a reader which
-                cells are empty and why, without the alarm. */}
-            <div style={{width:"100%"}}>
-              <GPUFeedIntegrityBanner dq={effFHist.dataQuality} periodNoun={effMode==="quarter"?"quarter":"month"}/>
-            </div>
-            <IllustrativeToggle illustrative={illustrative} setIllustrative={setIllustrative}/>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -2987,7 +2852,7 @@ function GPUQuarterlyBlock({qHist,qHistErr}){
 
       {/* Methodology note */}
       <div style={{fontSize:10,color:"#9ca3af",lineHeight:1.5,marginBottom:4}}>
-        <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> QoQ uses quarter-close values (last real snapshot in the quarter). Quarter averages are computed across all real snapshots in the quarter and surfaced separately — they do not replace close-to-close. Coverage = distinct real snapshot days / calendar days in the quarter (QTD quarters use elapsed days only). Synthetic/backfill-only validation points are excluded; append <code>?include=all</code> to the history endpoint to inspect them.
+        <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> QoQ uses quarter-close values (last real snapshot in the quarter). Quarter averages are computed across all real snapshots in the quarter and surfaced separately — they do not replace close-to-close. Coverage = distinct real snapshot days / calendar days in the quarter (QTD quarters use elapsed days only). Synthetic/backfill-only validation points are excluded.
       </div>
     </div>
   );
@@ -3655,7 +3520,7 @@ export default function App(){
         <div>
           <div style={{fontSize:15,fontWeight:600,color:"#111827"}}>AI Compute Pricing</div>
           <div style={{fontSize:11,color:"#9ca3af",marginTop:2}}>
-            Data loaded {fetchedAtLabel} · refresh buttons call live /api/* endpoints
+            Data loaded {fetchedAtLabel}
           </div>
         </div>
         <button onClick={refreshAll} disabled={anyBusy}

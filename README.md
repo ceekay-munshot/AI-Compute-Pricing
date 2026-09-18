@@ -82,10 +82,22 @@ repo has deliberately moved first, and they are all presentation:
   the period before it dipped.
 - **The header's fetched-at label** is generated at load instead of read from a
   build-time literal that had gone five months stale.
+- **Internal surfaces were removed from the UI.** The Representative Model Check
+  strip (Firecrawl status, mappings-monitored counters, scrape timestamp) and
+  both `Show diagnostics` disclosures are gone, taking the feed-integrity panel
+  and the illustrative-data toggle with them. Endpoint paths, raw exception text
+  and the `HISTORY_KV` binding name no longer appear on screen. Methodology
+  footnotes, the basis-change banner and every coverage marker were kept — they
+  explain the data rather than the machinery.
+- **The two pricepertoken proxies inject extra CSS** to hide the upstream's own
+  promo bar, newsletter signup and paid sponsor slots. Anchored on structure and
+  `rel="sponsored"`, never on sponsor names, and scoped so the pricing table,
+  the chart, the New Model Releases timeline and the `Last updated` stamp all
+  survive — verified in a browser against the live upstream.
 
-**Data and endpoints have not diverged in behaviour.** The three write-path
-removals listed above are still the only backend differences, and
-`functions/ppt-api/[[path]].js` is copied from google-dash unchanged.
+**No figure has diverged.** The three write-path removals listed above are still
+the only differences that touch data; the proxy changes are presentational CSS
+only, and `functions/ppt-api/[[path]].js` is copied from google-dash unchanged.
 
 ---
 

@@ -67,6 +67,25 @@ main div.max-w-7xl.py-12 { display: none !important; }
 /* Newsletter promo and sticky promo banner */
 main div[data-v-02bc130b],
 [class*="PromoBanner"] { display: none !important; }
+/* Upstream's paid sponsor slots and its own product promos.
+   Anchored on structure and on rel="sponsored" — never on a sponsor's name or
+   CTA text, because the inventory rotates (the bundle carries several sponsors
+   with per-slot taglines). Every rule here fails SAFE: if upstream restyles,
+   the selector stops matching and the chrome simply reappears; none of these
+   can match the pricing table, the chart, or the "Last updated" stamp.
+   Deliberately NOT widened to [class*="amber"] or [class*="sticky"] — either
+   would silently swallow the New Model Releases timeline or the table header. */
+/* Purple "Get the MCP" bar — the upstream vendor's own product ad. */
+div.bg-violet-600.text-white:has(a[href$="/mcp"]) { display: none !important; }
+/* Newsletter signup card, and the hero sponsor card that shares its container.
+   Matched via :has() on the email input / the sponsored link, so the sibling
+   "Last updated: …" stamp (div.mt-6.text-sm.text-gray-500) survives. */
+div.my-8.max-w-4xl.mx-auto:has(input[type="email"]),
+div.my-8.max-w-4xl.mx-auto:has(a[rel~="sponsored"]) { display: none !important; }
+/* Floating bottom-right sponsor banner. The existing div.fixed.bottom-4.right-4
+   rule above does not match it — the component has no plain bottom-4 class —
+   so this is an addition, not a replacement. */
+div.fixed.z-50.bottom-0.inset-x-0.bg-white.shadow-lg { display: none !important; }
 /* Footer */
 footer { display: none !important; }
 /* Modals / cookie / popups */
