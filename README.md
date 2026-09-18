@@ -95,6 +95,22 @@ repo has deliberately moved first, and they are all presentation:
   the chart, the New Model Releases timeline and the `Last updated` stamp all
   survive — verified in a browser against the live upstream.
 
+- **`/api/provider-pricing-matrix` is edge-cached.** It downloads ~35 MB from
+  eight upstream providers to emit 6.6 KB and used to do that on every request:
+  it set `s-maxage`, but Pages Functions ignore `s-maxage` unless the handler uses
+  the Cache API itself. `functions/api/_edge-cache.js` wraps it in `caches.default`.
+  Measured on a preview deploy: 0.09s served from cache against a 2.3-4.0s
+  baseline, bodies byte-identical to the uncached ones. `metric` and `weight` are
+  both in the cache key; the client's `b=<build hash>` is deliberately not, since
+  it does not change the body and a caller-controlled key component would let
+  each distinct value trigger another fan-out. The cache is per-PoP, so the
+  first reader in each region still pays cold cost.
+- **Two client fetches key on the build hash instead of the clock.** The peer
+  matrix answers with `max-age=86400` and never got to use it, because the old
+  `?v=<5-minute bucket>` minted a new URL every five minutes: 13 ms from browser
+  cache inside a bucket, 3,513 ms the moment it rolled over, for data that
+  changes daily.
+
 **No figure has diverged.** The three write-path removals listed above are still
 the only differences that touch data; the proxy changes are presentational CSS
 only, and `functions/ppt-api/[[path]].js` is copied from google-dash unchanged.
