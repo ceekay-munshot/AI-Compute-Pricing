@@ -50,6 +50,7 @@ import {
   gateReason,
 } from './_usage-weights.js';
 import { fetchMarketShare } from './_openrouter-rankings.js';
+import { withEdgeCache } from './_edge-cache.js';
 
 const UPSTREAM_BASE = 'https://api.pricepertoken.com/api/provider-pricing-history/';
 const CACHE_TTL = 21600; // 6 hours
@@ -569,7 +570,8 @@ function mergeProviderWeeks(captured, live) {
   };
 }
 
-export async function onRequestGet({ request }) {
+export async function onRequestGet(context) {
+  const { request } = context;
   const url = new URL(request.url);
   const metric = (url.searchParams.get('metric') || 'input').toLowerCase();
   if (metric !== 'input' && metric !== 'output') {
@@ -580,6 +582,27 @@ export async function onRequestGet({ request }) {
     return jsonResp({ success: false, error: 'weight must be "equal" or "usage"' }, 400);
   }
 
+  // Validation runs OUTSIDE the cache so a 400 is never stored.
+  //
+  // Both metric and weight go in the key. They are the only two parameters this
+  // handler reads (verified: searchParams appears exactly twice in this file),
+  // and each changes every figure in the body — a key that dropped one would
+  // hand a reader the other question's numbers, plausibly and with no error.
+  // The client's cache-busting b=<build hash> is deliberately NOT in the key:
+  // it does not affect the body, and anything a caller can set freely would let
+  // one request per distinct value trigger another ~35 MB upstream fan-out.
+  return withEdgeCache(
+    context,
+    { params: { metric, weight }, ttl: CACHE_TTL, browserTtl: 300 },
+    () => buildProviderMatrix(request, metric, weight),
+  );
+}
+
+/**
+ * The real work: eight upstream providers, ~35 MB downloaded to produce ~6.6 KB.
+ * Runs only on an edge-cache miss now, where it used to run on every request.
+ */
+async function buildProviderMatrix(request, metric, weight) {
   const results = await fetchAllProviders(PROVIDERS);
   const anyRows = results.some(r => r.rows.length);
   if (!anyRows) {
