@@ -39,7 +39,7 @@
  *
  * Routine data changes do NOT need a bump — the TTLs bound those.
  */
-const CACHE_SCHEMA = 'v3';
+const CACHE_SCHEMA = 'v4';
 
 /**
  * Build the cache key.
