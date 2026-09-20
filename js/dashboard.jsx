@@ -1655,6 +1655,14 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
   // providers list it, which is the best available proxy for how real a price
   // is. Models the source carries but does not price are left out and counted
   // underneath rather than padding the table with dashes.
+  // The table scrolls inside itself rather than pushing the page down, so its
+  // header has to stay put while the body moves. Sticky lives on the cells, not
+  // the row — a sticky <tr> does not work — and the bottom rule is an inset
+  // shadow because a border on a sticky cell scrolls away with border-collapse.
+  // Local to this table: gpuTh is shared with the quarter-close tables, which
+  // are short and must not become sticky.
+  const stickyTh={...gpuTh,position:"sticky",top:0,zIndex:1,background:"#fafafa",boxShadow:"inset 0 -1px 0 #e5e7eb"};
+
   const CLASS_ORDER={"Data Center":0,"Workstation":1,"Consumer":2};
   const stratIdx=new Map(GPU_STRATEGIC_ORDER.map((n,i)=>[n,i]));
   const pricedRows=rows.filter(r=>r.dailyPrice!=null);
@@ -1720,23 +1728,28 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
             <div style={{border:"0.5px solid #e5e7eb",borderRadius:8,overflow:"hidden",marginBottom:14,background:"#fff"}}>
               <div style={{padding:"9px 14px",borderBottom:"0.5px solid #f3f4f6",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <span style={{fontSize:11,fontWeight:600,color:"#111827"}}>All priced GPUs · {tableRows.length}</span>
-                <span style={{fontSize:10,color:"#9ca3af"}}>strategic SKUs first, then by class and provider breadth</span>
+                <span style={{fontSize:10,color:"#9ca3af"}}>strategic SKUs first, then by class and provider breadth · scroll for all {tableRows.length}</span>
               </div>
-              <div style={{overflowX:"auto"}}>
+              {/* Its own scroll area. At ~98 rows an unbounded table buried
+                  everything below it — the history charts, the methodology, the
+                  embed — under a screen and a half of consumer GPUs. Capped
+                  here, the section keeps its place on the page and the reader
+                  scrolls the list where the list is. */}
+              <div style={{overflowX:"auto",overflowY:"auto",maxHeight:GPU_TABLE_MAX_HEIGHT,overscrollBehavior:"contain"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                   <thead>
                     <tr style={{background:"#fafafa"}}>
-                      <th style={gpuTh}>GPU</th>
-                      <th style={gpuTh}>Class</th>
-                      <th style={gpuTh}>VRAM</th>
-                      <th style={{...gpuTh,textAlign:"right"}} title={tableBasis?"Measured as the "+FIN_BASIS_LABEL[tableBasis]:undefined}>{tableBasisHeading}</th>
-                      <th style={{...gpuTh,textAlign:"right"}}
+                      <th style={stickyTh}>GPU</th>
+                      <th style={stickyTh}>Class</th>
+                      <th style={stickyTh}>VRAM</th>
+                      <th style={{...stickyTh,textAlign:"right"}} title={tableBasis?"Measured as the "+FIN_BASIS_LABEL[tableBasis]:undefined}>{tableBasisHeading}</th>
+                      <th style={{...stickyTh,textAlign:"right"}}
                           title={"Hourly price divided by the card's rated board power, as published by getdeploying. "+
                                  "The price of a unit of installed power capacity — NOT an electricity cost. "+
                                  "Read it per row: the rows are not on one form-factor basis, so this is not an efficiency ranking."}>
                         $/kW&#8209;hr<div style={{fontSize:9,fontWeight:500,color:"#9ca3af",textTransform:"none",letterSpacing:0}}>rated board power</div>
                       </th>
-                      <th style={{...gpuTh,textAlign:"right"}}>Providers</th>
+                      <th style={{...stickyTh,textAlign:"right"}}>Providers</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1822,6 +1835,9 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
   );
 }
 
+// Roughly ten rows. Enough that the table reads as a list worth scrolling
+// rather than a stump, without the section owning the whole viewport.
+const GPU_TABLE_MAX_HEIGHT=440;
 const gpuTh={textAlign:"left",padding:"7px 12px",fontSize:10,textTransform:"uppercase",letterSpacing:".06em",color:"#6b7280",fontWeight:600};
 const gpuTd={padding:"7px 12px",verticalAlign:"middle"};
 
