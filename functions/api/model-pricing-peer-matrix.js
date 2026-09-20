@@ -84,10 +84,19 @@
  * may be stale.
  */
 
+import { withEdgeCache } from './_edge-cache.js';
+
 const UPSTREAM_BASE = 'https://api.pricepertoken.com/api/provider-pricing-history/';
-const CACHE_TTL = 86400; // 24 hours — Firecrawl + pricepertoken responses both
-                         // change at most daily; longer cache reduces load on
-                         // both upstreams and amortizes Firecrawl quota use.
+// One hour. This was 24 hours on the grounds that it reduced upstream load and
+// amortized Firecrawl quota — but on Pages neither held: the response's
+// s-maxage was ignored (Pages Functions skip the edge cache unless the code
+// uses the Cache API), and the Firecrawl call is a POST, which cf.cacheTtl
+// never caches. What the 24 hours DID do was let the pricepertoken subrequests
+// trail the source by up to a day, and — once the client stopped busting its
+// URL every five minutes — let a browser hold its copy for another day on top.
+// The edge cache in onRequestGet now does the load-shedding the old value only
+// claimed to, so this can be short: upstream + edge, worst case ~2 hours.
+const CACHE_TTL = 3600;
 
 /* Peer-pair representatives. Each rep declares an ordered list of `candidates`;
    the row uses the FIRST candidate with at least one matching upstream row.
@@ -977,7 +986,23 @@ function computeRepFreshness(rep, providerData, externalCatalog) {
   };
 }
 
-export async function onRequestGet({ request, env }) {
+export async function onRequestGet(context) {
+  const { request, env } = context;
+  // The handler reads no query parameter, so nothing but the path belongs in
+  // the key; the client's ?b=<build hash> is excluded by design. A response in
+  // which any provider failed is marked no-store at the bottom of
+  // buildPeerMatrix and so is never cached — pinning a matrix with holes in it
+  // for an hour is the failure provider-pricing-matrix already learned about.
+  // browserTtl 300: the payload is 164 KB, so a short browser hold saves
+  // re-downloading it on every tab switch without letting it go stale.
+  return withEdgeCache(
+    context,
+    { params: {}, ttl: CACHE_TTL, browserTtl: 300 },
+    () => buildPeerMatrix(request, env),
+  );
+}
+
+async function buildPeerMatrix(request, env) {
   // Fetch each unique provider once even if multiple reps share it
   const providerSlugs = Array.from(new Set(PEER_MODELS.map(r => r.providerSlug)));
   const fetched = await Promise.all(providerSlugs.map(s => fetchProvider(s)));
@@ -1390,7 +1415,7 @@ export async function onRequestGet({ request, env }) {
     googleModels,
     externalCatalog,
     providerErrors,
-  });
+  }, 200, providerErrors.length ? { 'Cache-Control': 'no-store' } : {});
 }
 
 export async function onRequestOptions() {

@@ -65,6 +65,48 @@ lived. Neither was modified in the move.
 
 ---
 
+## Freshness — how current the numbers are
+
+Caching and freshness are the same dial. **Cache lifetimes stack**: an edge TTL
+sits on top of whatever `cf.cacheTtl` a handler puts on its upstream subrequests,
+and a browser `max-age` sits on top of that again, so the worst case a reader can
+see is roughly their sum. Every number below is picked against how often its
+source actually changes.
+
+| Path | Source cadence | Upstream | Edge | Browser | Worst case behind source |
+|---|---|---|---|---|---|
+| `provider-pricing-matrix` | daily | 1 h | 1 h | 0 | **~2 h** |
+| `model-pricing-peer-matrix` | daily | 1 h | 1 h | 5 min | **~2 h** |
+| `gpu-hardware-pricing-data` | live scrape | — | — | 5 min | ~5 min |
+| `gpu-hardware-pricing-history` | daily KV capture | — | — | 2 min | ~2 min |
+| `pricing-share-signal` | daily KV capture | — | — | 10 min | ~10 min + its matrix |
+| the three embeds | third-party | — | — | 5 min | ~5 min |
+
+If you change a TTL, change it with this table. The trap is that a longer cache
+looks free — the page gets faster and nothing appears to break, because stale
+prices render exactly like fresh ones.
+
+An open page does not sit still either. It re-runs every fetch every 10 minutes
+while visible, and on return to a tab that sat hidden longer than that. The
+refresh happens **without remounting**, so a reader keeps their tab, subtab,
+toggles and scroll position; a failed background refresh leaves what is on
+screen alone rather than replacing it with an error, and a later one that
+succeeds clears an error the first load raised. The reverse-proxied embeds
+reload only on the return-to-a-hidden-tab path, never under someone reading
+them. See AUTO-REFRESH in `js/dashboard.jsx`.
+
+Two things this cannot fix, because the data is written elsewhere:
+
+- google-dash is the sole writer of `HISTORY_KV`. If its capture stalls, this
+  dashboard faithfully shows the last thing captured. As of 2026-09-18 the GPU
+  daily snapshot had no entry for 09-17, and the OpenRouter *provider* share
+  capture had not run since 2026-06-09 — the latter does no visible harm only
+  because `provider-pricing-matrix` reads those totals live and merges them over
+  the captured history.
+- The embeds are third-party pages. Their own freshness is theirs.
+
+---
+
 ## Divergence from google-dash
 
 The rule elsewhere in this README — *a fix belongs in google-dash first* — still
@@ -110,6 +152,12 @@ repo has deliberately moved first, and they are all presentation:
   `?v=<5-minute bucket>` minted a new URL every five minutes: 13 ms from browser
   cache inside a bucket, 3,513 ms the moment it rolled over, for data that
   changes daily.
+
+- **The page auto-refreshes and the cache lifetimes are shorter.** google-dash
+  fetches once on mount and never again. It also caches the provider matrix
+  upstream for 6 h and the peer matrix for 24 h; both are 1 h here, because
+  edge caching now does the load-shedding those long TTLs were paying for. See
+  [Freshness](#freshness--how-current-the-numbers-are).
 
 **No figure has diverged.** The three write-path removals listed above are still
 the only differences that touch data; the proxy changes are presentational CSS

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, Fragment } from "react";
+import { useState, useRef, useCallback, useEffect, Fragment, createContext, useContext } from "react";
 import { BarChart, Bar, LineChart, Line, ComposedChart, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, CartesianGrid, Legend } from "recharts";
 import { buildXlsx, downloadXlsx } from "./xlsx-export.js";
 import { buildGPUPricingWorkbook, gpuWorkbookFilename } from "./gpu-xlsx-report.js";
@@ -370,17 +370,20 @@ function PricingSharePartialView({ header, quarter }){
 ═══════════════════════════════════════════════════════ */
 function PricingShareSignalBlock(){
   const[state,setState]=useState({phase:"loading",data:null,error:null});
+  const {dataTick}=useContext(DataRefreshContext);
+  const loaded=useRef(false); // true once real figures are on screen
   useEffect(()=>{
     let cancelled=false;
-    fetch("/api/pricing-share-signal")
+    const background=loaded.current; // see AUTO-REFRESH
+    fetch("/api/pricing-share-signal",{cache:background?"no-cache":"default"})
       .then(r=>r.json())
       .then(d=>{ if(cancelled) return;
-        if(!d.success) setState({phase:"error",data:null,error:d.error||"Unknown error"});
-        else setState({phase:"ready",data:d,error:null});
+        if(!d.success){ if(!background) setState({phase:"error",data:null,error:d.error||"Unknown error"}); }
+        else { loaded.current=true; setState({phase:"ready",data:d,error:null}); }
       })
-      .catch(e=>{ if(!cancelled) setState({phase:"error",data:null,error:e.message}); });
+      .catch(e=>{ if(!cancelled&&!background) setState({phase:"error",data:null,error:e.message}); });
     return ()=>{cancelled=true;};
-  },[]);
+  },[dataTick]);
 
   /* Regime-to-color: green=favorable pricing-power, amber=neutral/ok, red=weak/anomaly */
   const regimeColor=(priceReg,shareReg)=>{
@@ -636,6 +639,52 @@ function PricingShareSignalBlock(){
    Falls back to "dev" when the module is loaded outside that build (tests). */
 const BUILD=typeof __BUILD__!=="undefined"?__BUILD__:"dev";
 
+/* ═══════════════════════════════════════════════════════
+   AUTO-REFRESH
+
+   The page used to fetch once, on mount, and never again: a dashboard left
+   open showed whatever it loaded, however long ago that was. Now App re-runs
+   every data fetch on a timer and broadcasts that through DataRefreshContext,
+   so each block pulls fresh figures WITHOUT remounting — the reader keeps
+   their tab, subtab, toggles and scroll position.
+
+   dataTick  — bumped every REFRESH_EVERY_MS while the page is visible, and on
+               return to a page that sat hidden for longer than that. Every
+               fetch effect lists it as a dependency.
+   embedTick — bumped ONLY on that return-to-page path. The reverse-proxied
+               third-party pages reload on it and at no other time: reloading
+               an iframe under someone who is reading it is worse than a few
+               minutes' staleness in a page they can see is live.
+
+   A background refresh never swaps figures for an error card. If it fails,
+   what is on screen stays and the next tick tries again; if the first load
+   had failed, a later tick that succeeds replaces the error. It also asks the
+   browser to revalidate (cache:"no-cache"), otherwise a long max-age would
+   hand back the very copy it is trying to replace.
+
+   How far behind the SOURCE any figure can be is set server-side, not here —
+   see CACHE_TTL in functions/api/provider-pricing-matrix.js and
+   model-pricing-peer-matrix.js. This only makes sure an open page catches up.
+═══════════════════════════════════════════════════════ */
+const REFRESH_EVERY_MS=10*60*1000;
+const DataRefreshContext=createContext({dataTick:0,embedTick:0});
+
+/* The cache-busting bucket in an embed's URL, fixed for the life of the embed.
+   It used to be recomputed on every render, so a parent re-render after any
+   five-minute boundary silently reloaded the third-party page. Nothing
+   re-rendered App until the refresh timer did — at which point every embed
+   would have reloaded every ten minutes under the reader. */
+function useEmbedBucket(){
+  const {embedTick}=useContext(DataRefreshContext);
+  const[bucket,setBucket]=useState(()=>Math.floor(Date.now()/3e5));
+  const first=useRef(true);
+  useEffect(()=>{
+    if(first.current){first.current=false;return;}
+    setBucket(Math.floor(Date.now()/3e5));
+  },[embedTick]);
+  return bucket;
+}
+
 function ModelPricingHistoryBlock(){
   const[metric,setMetric]=useState("input");
   const[view,setView]=useState("avg"); // "avg" | "qoq" | "yoy"
@@ -646,24 +695,36 @@ function ModelPricingHistoryBlock(){
   const[weight,setWeight]=useState("equal");
   const[state,setState]=useState({phase:"loading",data:null,error:null});
 
+  const {dataTick}=useContext(DataRefreshContext);
+  // The metric|weight whose figures are currently on screen. A tick that
+  // arrives with the SAME pair is a background refresh. A new pair means the
+  // reader asked a different question, and the old figures must go: keeping
+  // them through a failed fetch would show one metric's numbers under the
+  // other's label.
+  const shownKey=useRef(null);
   useEffect(()=>{
     let cancelled=false;
-    setState(s=>({...s,phase:"loading"}));
+    const key=metric+"|"+weight;
+    const background=shownKey.current===key;
+    if(!background) setState(s=>({...s,phase:"loading"}));
     // Keyed on the build hash, never on the clock. This endpoint fans out to
     // pricepertoken for all eight providers, so a key that changes on a timer
     // (the "&v=<5-minute bucket>" the peer matrix uses, where the upstream is
     // one small request) gave every bucket its own cache key, re-ran the
     // fan-out, and made the upstream fail six providers at a time. A build
     // hash changes exactly once per deploy: one cold fetch, then reuse.
-    fetch("/api/provider-pricing-matrix?metric="+metric+"&weight="+weight+"&b="+BUILD)
+    // Now that the endpoint sits behind the edge cache, a background refresh
+    // costs ~80 ms and never re-runs the fan-out, which is what makes a timer
+    // safe here where a clock-keyed URL was not.
+    fetch("/api/provider-pricing-matrix?metric="+metric+"&weight="+weight+"&b="+BUILD,{cache:background?"no-cache":"default"})
       .then(r=>r.json())
       .then(d=>{ if(cancelled) return;
-        if(!d.success) setState({phase:"error",data:null,error:d.error||"Unknown error"});
-        else setState({phase:"ready",data:d,error:null});
+        if(!d.success){ if(!background) setState({phase:"error",data:null,error:d.error||"Unknown error"}); }
+        else { shownKey.current=key; setState({phase:"ready",data:d,error:null}); }
       })
-      .catch(e=>{ if(!cancelled) setState({phase:"error",data:null,error:e.message}); });
+      .catch(e=>{ if(!cancelled&&!background) setState({phase:"error",data:null,error:e.message}); });
     return ()=>{cancelled=true;};
-  },[metric,weight]);
+  },[metric,weight,dataTick]);
 
   const weighted=weight==="usage";
   const title   ="Quarterly Model Pricing by Company";
@@ -942,6 +1003,8 @@ function ModelPricingMatrixTable(){
   // read as a soft -44% quarter but a clean 2x step month-over-month)
   // and is currently the only granularity where YoY is computable at all.
   const[gran,setGran]=useState("quarter");
+  const {dataTick}=useContext(DataRefreshContext);
+  const loaded=useRef(false); // true once real figures are on screen
   useEffect(()=>{
     let cancelled=false;
     // Source: /api/model-pricing-peer-matrix proxies pricepertoken's own
@@ -951,10 +1014,6 @@ function ModelPricingMatrixTable(){
     // data — not the canonical KV snapshot store, which only reaches back as
     // far as the dashboard has been running.
     //
-    // The 5-minute bucket on the URL means every page load within that
-    // window hits the same edge-cache entry, but a schema/code change
-    // crossing the boundary always lands on a fresh URL — so a stale
-    // 6-hour edge-cached response shape can't trap clients.
     // Keyed on the build hash, not the clock. This endpoint answers with
     // Cache-Control: public, max-age=86400, but the old "?v=<5-minute bucket>"
     // minted a brand-new URL every five minutes, so the browser never had an
@@ -963,16 +1022,18 @@ function ModelPricingMatrixTable(){
     // bucket rolled over — for data that only changes daily. A build hash
     // changes exactly once per deploy: one cold fetch, then reuse. Same
     // reasoning as ModelPricingHistoryBlock above, which already does this.
-    fetch("/api/model-pricing-peer-matrix?b="+BUILD)
+    const background=loaded.current; // see AUTO-REFRESH
+    fetch("/api/model-pricing-peer-matrix?b="+BUILD,{cache:background?"no-cache":"default"})
       .then(r=>r.ok?r.json():Promise.reject(new Error("HTTP "+r.status)))
       .then(d=>{
         if(cancelled)return;
-        if(!d||d.success===false){setState({phase:"error",data:null,error:d?.error||"Unknown error"});return;}
+        if(!d||d.success===false){if(!background)setState({phase:"error",data:null,error:d?.error||"Unknown error"});return;}
+        loaded.current=true;
         setState({phase:"ready",data:d,error:null});
       })
-      .catch(e=>{if(!cancelled)setState({phase:"error",data:null,error:e.message||"Fetch failed"});});
+      .catch(e=>{if(!cancelled&&!background)setState({phase:"error",data:null,error:e.message||"Fetch failed"});});
     return()=>{cancelled=true;};
-  },[]);
+  },[dataTick]);
 
   const G=GRAN[gran];
 
@@ -1320,6 +1381,7 @@ function ModelPricingTab(){
    PricingHistoryTab. Nothing else about this subtab changed. */
 function ModelPricingMatrixSubtab(){
   const[err,setErr]=useState(false);
+  const bucket=useEmbedBucket();
   return(
     <>
       <ModelPricingMatrixTable/>
@@ -1335,7 +1397,7 @@ function ModelPricingMatrixSubtab(){
       ):(
         <div style={{borderRadius:8,overflow:"hidden",border:"0.5px solid #e5e7eb",background:"#fff"}}>
           <iframe
-            src={"/api/pricepertoken-proxy?v="+Math.floor(Date.now()/3e5)}
+            src={"/api/pricepertoken-proxy?v="+bucket}
             title="Price Per Token — Model Pricing"
             loading="lazy"
             onError={()=>setErr(true)}
@@ -1359,6 +1421,7 @@ function ModelPricingMatrixSubtab(){
    same proxy. */
 function LLMPricingScatterSubtab(){
   const[err,setErr]=useState(false);
+  const bucket=useEmbedBucket();
   return(
     <>
       <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
@@ -1383,7 +1446,7 @@ function LLMPricingScatterSubtab(){
       ):(
         <div style={{borderRadius:8,overflow:"hidden",border:"0.5px solid #e5e7eb",background:"#fff"}}>
           <iframe
-            src={"/api/llmpricing-proxy/?quality=overall&v="+Math.floor(Date.now()/3e5)}
+            src={"/api/llmpricing-proxy/?quality=overall&v="+bucket}
             title="LLM Pricing — Quality / Value Scatter"
             loading="lazy"
             onError={()=>setErr(true)}
@@ -1432,29 +1495,35 @@ function GPUHardwarePricingTab(){
   const[histView,setHistView]=useState("quarter");   // quarter | daily (inside Infra subtab)
   const[gpuSubtab,setGpuSubtab]=useState("financial"); // "financial" default per investor framing
 
+  const {dataTick}=useContext(DataRefreshContext);
+  // Per series: true once that series has real figures on screen.
+  const loaded=useRef({data:false,hist:false,qHist:false,fHist:false});
   useEffect(()=>{
     let cancelled=false;
+    // Each series refreshes on its own (see AUTO-REFRESH). Once a series has
+    // loaded, a failed refresh leaves it on screen rather than raising that
+    // series' error; a success always clears a prior error, so a page whose
+    // first load failed heals itself on the next tick.
+    const load=(name,url,ok,set,setErr)=>{
+      const background=loaded.current[name];
+      fetch(url,{cache:background?"no-cache":"default"})
+        .then(r=>r.ok?r.json():Promise.reject(r.status))
+        .then(j=>{
+          if(cancelled)return;
+          if(ok(j)){loaded.current[name]=true;set(j);setErr(false);}
+          else if(!background)setErr(true);
+        })
+        .catch(()=>{if(!cancelled&&!background)setErr(true);});
+    };
     // Build-hash keyed for the same reason as the peer matrix above. This one
     // answers with max-age=300, so a returning reader inside five minutes is
     // served from browser cache instead of re-running the upstream scrape.
-    fetch("/api/gpu-hardware-pricing-data?b="+BUILD)
-      .then(r=>r.ok?r.json():Promise.reject(r.status))
-      .then(j=>{if(!cancelled){if(j&&j.ok){setData(j);}else{setLoadErr(true);}}})
-      .catch(()=>{if(!cancelled)setLoadErr(true);});
-    fetch("/api/gpu-hardware-pricing-history?window=60")
-      .then(r=>r.ok?r.json():Promise.reject(r.status))
-      .then(j=>{if(!cancelled){if(j&&j.success){setHist(j);}else{setHistErr(true);}}})
-      .catch(()=>{if(!cancelled)setHistErr(true);});
-    fetch("/api/gpu-hardware-pricing-history?view=quarter&window=400")
-      .then(r=>r.ok?r.json():Promise.reject(r.status))
-      .then(j=>{if(!cancelled){if(j&&j.success){setQHist(j);}else{setQHistErr(true);}}})
-      .catch(()=>{if(!cancelled)setQHistErr(true);});
-    fetch("/api/gpu-hardware-pricing-history?view=financial&window=400")
-      .then(r=>r.ok?r.json():Promise.reject(r.status))
-      .then(j=>{if(!cancelled){if(j&&j.success){setFHist(j);}else{setFHistErr(true);}}})
-      .catch(()=>{if(!cancelled)setFHistErr(true);});
+    load("data","/api/gpu-hardware-pricing-data?b="+BUILD,j=>j&&j.ok,setData,setLoadErr);
+    load("hist","/api/gpu-hardware-pricing-history?window=60",j=>j&&j.success,setHist,setHistErr);
+    load("qHist","/api/gpu-hardware-pricing-history?view=quarter&window=400",j=>j&&j.success,setQHist,setQHistErr);
+    load("fHist","/api/gpu-hardware-pricing-history?view=financial&window=400",j=>j&&j.success,setFHist,setFHistErr);
     return()=>{cancelled=true;};
-  },[]);
+  },[dataTick]);
 
   const updatedTxt=data?.sourceUpdatedAt?.text||null;
 
@@ -1539,6 +1608,7 @@ function GPUFinancialSubtab({fHist,fHistErr}){
    - Live reverse-proxied getdeploying table
 ═══════════════════════════════════════════════════════ */
 function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,qHist,qHistErr,hist,histErr,embedErr,setEmbedErr}){
+  const bucket=useEmbedBucket();
   const rows=data?.rows||[];
   const byName={};
   for(const r of rows)if(!byName[r.gpuModel])byName[r.gpuModel]=r;
@@ -1649,7 +1719,7 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
       ):(
         <div style={{borderRadius:8,overflow:"hidden",border:"0.5px solid #e5e7eb",background:"#fff"}}>
           <iframe
-            src={"/api/getdeploying-gpus-proxy?v="+Math.floor(Date.now()/3e5)}
+            src={"/api/getdeploying-gpus-proxy?v="+bucket}
             title="GetDeploying — GPU Hardware Pricing"
             loading="lazy"
             onError={()=>setEmbedErr(true)}
@@ -3410,6 +3480,7 @@ function Sparkline({pts,w=80,h=22}){
 ═══════════════════════════════════════════════════════ */
 function PPTHistoryIframe(){
   const [h,setH]=useState(920);
+  const bucket=useEmbedBucket();
   useEffect(()=>{
     function onMsg(e){
       const d=e&&e.data;
@@ -3422,7 +3493,7 @@ function PPTHistoryIframe(){
   },[]);
   return(
     <iframe
-      src={"/api/pricepertoken-history-proxy?v="+Math.floor(Date.now()/3e5)}
+      src={"/api/pricepertoken-history-proxy?v="+bucket}
       title="Open Router Pricing History"
       loading="lazy"
       style={{border:0,display:"block",width:"100%",height:h,transition:"height .2s ease"}}
@@ -3498,6 +3569,31 @@ export default function App(){
   const[fetchedAtLabel,setFetchedAtLabel]=useState(nowUtcLabel);
   const[refreshTick,setRefreshTick]=useState(0);
 
+  // See AUTO-REFRESH. lastRefresh is the single clock both triggers read, so
+  // coming back to the page and the timer can never double-fire.
+  const[ticks,setTicks]=useState({dataTick:0,embedTick:0});
+  const lastRefresh=useRef(Date.now());
+  useEffect(()=>{
+    const refresh=(withEmbeds)=>{
+      lastRefresh.current=Date.now();
+      setTicks(t=>({dataTick:t.dataTick+1,embedTick:withEmbeds?t.embedTick+1:t.embedTick}));
+      setFetchedAtLabel(nowUtcLabel());
+    };
+    const due=()=>Date.now()-lastRefresh.current>=REFRESH_EVERY_MS;
+    // Checked every minute rather than one ten-minute setInterval, so a page
+    // that slept (laptop lid, throttled background tab) catches up promptly.
+    const timer=setInterval(()=>{
+      if(document.visibilityState==="visible"&&due())refresh(false);
+    },60*1000);
+    // Returning to a page that sat hidden: the reader was not looking, so this
+    // is the one moment the embeds may reload too.
+    const onVisible=()=>{
+      if(document.visibilityState==="visible"&&due())refresh(true);
+    };
+    document.addEventListener("visibilitychange",onVisible);
+    return()=>{clearInterval(timer);document.removeEventListener("visibilitychange",onVisible);};
+  },[]);
+
   const[allPressed,setAllPressed]=useState(false);
   // google-dash computed anyBusy from the OpenRouter / Radar / Trends usePanel
   // panels that its header owned. This dashboard has no shared usePanel panels:
@@ -3515,6 +3611,7 @@ export default function App(){
     // it and re-runs every fetch that tab owns — the same effect the panel
     // refreshers had in google-dash, reached a different way.
     setRefreshTick(t=>t+1);
+    lastRefresh.current=Date.now(); // a manual refresh resets the auto-refresh clock
   }
 
   const TABS=[
@@ -3531,7 +3628,7 @@ export default function App(){
         <div>
           <div style={{fontSize:15,fontWeight:600,color:"#111827"}}>AI Compute Pricing</div>
           <div style={{fontSize:11,color:"#9ca3af",marginTop:2}}>
-            Data loaded {fetchedAtLabel}
+            Last refreshed {fetchedAtLabel} · updates automatically
           </div>
         </div>
         <button onClick={refreshAll} disabled={anyBusy}
@@ -3552,6 +3649,7 @@ export default function App(){
       </div>
 
       {/* Active tab */}
+      <DataRefreshContext.Provider value={ticks}>
       <div style={S.card}>
         {tab==="pricing"&&<ModelPricingTab key={"pricing-"+refreshTick}/>}
         {tab==="gpu"&&<GPUHardwarePricingTab key={"gpu-"+refreshTick}/>}
@@ -3563,6 +3661,7 @@ export default function App(){
             a few seconds. google-dash never remounts it — it keys no tab. */}
         {tab==="history"&&<PricingHistoryTab key={"history-"+refreshTick}/>}
       </div>
+      </DataRefreshContext.Provider>
 
       {/* Footer */}
       <div style={{marginTop:10,fontSize:10,color:"#9ca3af",textAlign:"center"}}>

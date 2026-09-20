@@ -15,7 +15,8 @@
  * for transparency (so the reader can see how coverage shifts over time).
  *
  * This is DERIVED from a real live upstream — not local captured snapshots.
- * The matrix is cached at the CF edge for CACHE_TTL seconds.
+ * The matrix is edge-cached for CACHE_TTL seconds (functions/api/_edge-cache.js),
+ * and its upstream subrequests are cached for the same period — see CACHE_TTL.
  *
  * Honesty rules — the whole reason this exists:
  *   - No synthetic backfill. Quarters prior to the upstream's depth simply
@@ -53,7 +54,16 @@ import { fetchMarketShare } from './_openrouter-rankings.js';
 import { withEdgeCache } from './_edge-cache.js';
 
 const UPSTREAM_BASE = 'https://api.pricepertoken.com/api/provider-pricing-history/';
-const CACHE_TTL = 21600; // 6 hours
+// One hour, and it is the bound on how far behind pricepertoken this can fall.
+// Two caches use it and their lifetimes ADD: the upstream subrequests
+// (cf.cacheTtl in fetchProvider) and the edge cache over the computed matrix
+// (withEdgeCache in onRequestGet). At the previous 6 hours each, the matrix
+// could trail a source that publishes daily by ~12 hours — long enough for a
+// reader to see yesterday's prices well into today. At 1 hour each the worst
+// case is ~2 hours. Upstream load stays modest: the edge cache means the
+// eight-provider fan-out runs at most once an hour per Cloudflare location,
+// where before any caching it ran on every single request.
+const CACHE_TTL = 3600;
 
 /**
  * Provider families we render as columns. Slugs match upstream's provider
@@ -593,7 +603,11 @@ export async function onRequestGet(context) {
   // one request per distinct value trigger another ~35 MB upstream fan-out.
   return withEdgeCache(
     context,
-    { params: { metric, weight }, ttl: CACHE_TTL, browserTtl: 300 },
+    // browserTtl 0 restores the decision documented in jsonResp above: a
+    // browser max-age pinned whatever a tab first loaded, and let two tabs
+    // opened minutes apart disagree. With the edge cache in front, that
+    // revalidation now costs ~80 ms instead of a full fan-out.
+    { params: { metric, weight }, ttl: CACHE_TTL, browserTtl: 0 },
     () => buildProviderMatrix(request, metric, weight),
   );
 }
