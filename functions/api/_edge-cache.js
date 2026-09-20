@@ -29,11 +29,17 @@
  */
 
 /**
- * Bump when the SHAPE of a cached payload changes in a way a already-deployed
- * bundle would misread. Routine data changes do not need it — the TTLs below
- * bound those.
+ * Bump this on any deploy that changes a cached payload's SHAPE, or any cache
+ * setting attached to it. Entries already in the edge cache are NOT evicted by
+ * a deploy: they keep serving, with the headers they were stored with, until
+ * their old TTL runs out. Shortening a TTL therefore does nothing to the copies
+ * already out there — observed live, where provider-pricing-matrix kept
+ * answering s-maxage=21600 from an entry stored before the TTL was cut to 3600.
+ * Changing the key is the only way to abandon them.
+ *
+ * Routine data changes do NOT need a bump — the TTLs bound those.
  */
-const CACHE_SCHEMA = 'v1';
+const CACHE_SCHEMA = 'v2';
 
 /**
  * Build the cache key.
