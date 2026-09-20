@@ -1468,6 +1468,12 @@ function LLMPricingScatterSubtab(){
 
 // Strategic SKU order for the comparison table. Matches decision-weight
 // (H/B class trainers first, then mid-training + inference workhorses).
+// Must stay name-for-name identical to GPU_TRACKED_SKUS in
+// functions/api/_gpu-tracked-skus.js: that list decides which SKUs the server
+// fetches board power for. A name here that is missing there renders a blank
+// $/kW cell; a name there that is missing here fetches a detail page nobody
+// shows. They are separate files because functions/ is not in the client
+// bundle's module graph.
 const GPU_STRATEGIC_ORDER=[
   "Nvidia H100","Nvidia H200","Nvidia B200","Nvidia GB200",
   "Nvidia A100","Nvidia L40S",
@@ -1702,6 +1708,12 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
                       <th style={gpuTh}>GPU</th>
                       <th style={gpuTh}>VRAM</th>
                       <th style={{...gpuTh,textAlign:"right"}} title={tableBasis?"Measured as the "+FIN_BASIS_LABEL[tableBasis]:undefined}>{tableBasisHeading}</th>
+                      <th style={{...gpuTh,textAlign:"right"}}
+                          title={"Hourly price divided by the card's rated board power, as published by getdeploying. "+
+                                 "The price of a unit of installed power capacity — NOT an electricity cost. "+
+                                 "Read it per row: the rows are not on one form-factor basis, so this is not an efficiency ranking."}>
+                        $/kW&#8209;hr<div style={{fontSize:9,fontWeight:500,color:"#9ca3af",textTransform:"none",letterSpacing:0}}>rated board power</div>
+                      </th>
                       <th style={{...gpuTh,textAlign:"right"}}>Providers</th>
                     </tr>
                   </thead>
@@ -1715,11 +1727,33 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
                           {fmtUSD(r.dailyPrice)}
                           {!tableBasis&&r.dailyBasis&&<div style={{fontSize:9,fontWeight:500,color:r.dailyBasis==="median"?"#1d4ed8":"#9ca3af"}}>{FIN_BASIS_SHORT[r.dailyBasis]}</div>}
                         </td>
+                        <td style={{...gpuTd,textAlign:"right",color:"#374151"}}
+                            title={r.boardPowerWatts==null
+                              ?"No rated board power published for this card, so this cannot be computed."
+                              :r.boardPowerWatts+" W rated"+(r.boardPowerVariant?" · "+r.boardPowerVariant:"")+
+                               (r.dailyPrice!=null?" · "+fmtUSD(r.dailyPrice)+"/hr":"")}>
+                          {r.pricePerKilowattHour!=null?"$"+r.pricePerKilowattHour.toFixed(2):"—"}
+                          {r.boardPowerWatts!=null&&(
+                            <div style={{fontSize:9,fontWeight:500,color:"#9ca3af"}}>
+                              {r.boardPowerWatts}&#8239;W{r.boardPowerVariant?" "+r.boardPowerVariant:""}
+                            </div>
+                          )}
+                        </td>
                         <td style={{...gpuTd,textAlign:"right",color:"#6b7280"}}>{r.providerCount??"—"}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+              </div>
+              <div style={{padding:"8px 14px",borderTop:"0.5px solid #f3f4f6",fontSize:10,color:"#9ca3af",lineHeight:1.5}}>
+                <b style={{color:"#6b7280",fontWeight:600}}>$/kW&#8209;hr</b> is the hourly price divided by the card's rated
+                board power — what a unit of installed power capacity costs to rent. It is <b style={{color:"#6b7280",fontWeight:600}}>not
+                an electricity cost</b>. Read each row on its own: board power is a nameplate figure published per card by
+                getdeploying, and the card it names differs by row — their H100 figure is the SXM part, their A100 figure the
+                PCIe one, and the PCIe H100 draws half what the SXM does. The hourly price alongside it is a median across
+                every provider listing that model, PCIe and SXM machines together. So the column compares a blended price
+                against one variant's nameplate, and the order it implies is <b style={{color:"#6b7280",fontWeight:600}}>not an
+                efficiency ranking</b>.
               </div>
             </div>
           )}

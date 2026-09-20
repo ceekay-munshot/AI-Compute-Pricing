@@ -39,6 +39,16 @@ says otherwise.
 /GPU-hour month-on-month by GPU model, with both
 subtabs: *Financial Correlation* and *Infra Monitoring*.
 
+The GPU table's **$/kW-hr** column is the hourly price divided by the card's rated
+board power, read from getdeploying's own structured data rather than hardcoded —
+their A100 page publishes 300 W (the PCIe part) where a hand-written table would
+very likely have said 400 W (SXM). It is the cost of renting a unit of installed
+power capacity, **not** an electricity cost, and it is not an efficiency ranking:
+board power is published per card and the card named differs by row, while the
+price beside it is a median blended across every provider listing that model. The
+column states its own caveat under the table. Both sides denominate one GPU, and
+the parser refuses to emit a figure if the source ever stops saying so.
+
 **Pricing History** — *Quarterly Model Pricing by Company*, the average `# AI Compute Pricing
 
 A standalone Cloudflare Pages dashboard for tracking the price of AI compute:
@@ -77,10 +87,18 @@ source actually changes.
 |---|---|---|---|---|---|
 | `provider-pricing-matrix` | daily | 1 h | 1 h | 0 | **~2 h** |
 | `model-pricing-peer-matrix` | daily | 1 h | 1 h | 5 min | **~2 h** |
-| `gpu-hardware-pricing-data` | live scrape | — | — | 5 min | ~5 min |
+| `gpu-hardware-pricing-data` | live scrape | — | 5 min | 0 | **~5 min** |
 | `gpu-hardware-pricing-history` | daily KV capture | — | — | 2 min | ~2 min |
 | `pricing-share-signal` | daily KV capture | — | — | 10 min | ~10 min + its matrix |
 | the three embeds | third-party | — | — | 5 min | ~5 min |
+
+That row is edge-cached rather than uncached because it now reads a detail page
+per tracked SKU for board power on top of the listing — seven fetches where there
+was one. The cache is the precondition for the feature, not a bonus, and the
+5-minute lifetime keeps the path inside the budget it already had. Board power
+rides the same entry as the prices; it is a hardware specification and changes
+approximately never, but giving it its own longer lifetime would stack a second
+TTL on this one, which is the drift this section exists to prevent.
 
 If you change a TTL, change it with this table. The trap is that a longer cache
 looks free — the page gets faster and nothing appears to break, because stale

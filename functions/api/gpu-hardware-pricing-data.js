@@ -31,27 +31,59 @@
 // with it on the way in for exactly the same reason. Resolving here means the live
 // table, the KPI cards and the workbook cannot drift into three different answers.
 import { normalizeDailyPoint } from './_gpu-price-basis.js';
+import { GPU_TRACKED_SKUS } from './_gpu-tracked-skus.js';
+import { withEdgeCache } from './_edge-cache.js';
 
 const SOURCE_URL = 'https://getdeploying.com/gpus';
+const DETAIL_BASE = 'https://getdeploying.com/gpus/';
 
-export async function onRequestGet() {
+// This endpoint used to re-scrape a 543 KB page on EVERY request. It now also
+// reads one detail page per tracked SKU for board power, which would have made
+// that seven fetches per request, so the edge cache is a precondition of the
+// feature rather than a nicety. 300 s keeps the path inside the ~5 minute
+// freshness budget the README's table already gives it.
+const EDGE_TTL = 300;
+
+// Board power is a hardware specification: it changes when a new SKU appears,
+// not when a price moves. It rides the same 300 s entry as the prices only
+// because it lives in the same payload — there is no separate, longer cache,
+// because a second lifetime stacked on this one is exactly the kind of drift
+// the Freshness section warns about.
+const DETAIL_HEAD_BYTES = 65536;  // the ld+json block sits well inside this
+const DETAIL_TIMEOUT_MS = 6000;
+// Three at a time. A Worker holds at most six simultaneous outbound
+// connections, so 1 list + 3 detail leaves headroom and nothing queues.
+const DETAIL_CONCURRENCY = 3;
+
+const UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+export async function onRequestGet(context) {
+  // No query parameter varies this body, so the path alone is the key.
+  return withEdgeCache(
+    context,
+    { params: {}, ttl: EDGE_TTL, browserTtl: 0 },
+    () => buildGpuPricing(),
+  );
+}
+
+async function buildGpuPricing() {
   try {
-    const resp = await fetch(SOURCE_URL, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        Accept: 'text/html,application/xhtml+xml',
-      },
-    });
+    const [list, power] = await Promise.all([fetchList(), fetchBoardPower()]);
 
-    if (!resp.ok) {
-      return json({ ok: false, error: 'upstream_' + resp.status }, 502);
+    if (!list.ok) {
+      return json({ ok: false, error: 'upstream_' + list.status }, 502);
     }
 
-    const html = await resp.text();
-    const rows = parseRows(html);
-    const sourceUpdatedAt = parseUpdatedAt(html);
+    const rows = parseRows(list.html).map(r => withBoardPower(r, power.bySku));
+    const sourceUpdatedAt = parseUpdatedAt(list.html);
 
+    // A board-power outage deliberately does NOT mark this no-store. Blank watt
+    // cells are the accepted outcome; un-caching the response would instead put
+    // a live 543 KB scrape plus six subrequests on every request for as long as
+    // the outage lasted, which is worse than the state this replaces. Prices
+    // are unaffected — they come from the list page, which succeeded or this
+    // line was never reached.
     return json(
       {
         ok: true,
@@ -59,6 +91,7 @@ export async function onRequestGet() {
         sourceUpdatedAt,
         fetchedAt: new Date().toISOString(),
         count: rows.length,
+        boardPower: { requested: power.requested, resolved: power.resolved, errors: power.errors },
         rows,
       },
       200,
@@ -67,6 +100,199 @@ export async function onRequestGet() {
   } catch (err) {
     return json({ ok: false, error: err.message || 'parse_error' }, 502);
   }
+}
+
+async function fetchList() {
+  const resp = await fetch(SOURCE_URL, {
+    headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml' },
+  });
+  if (!resp.ok) return { ok: false, status: resp.status, html: '' };
+  return { ok: true, status: resp.status, html: await resp.text() };
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   BOARD POWER
+
+   getdeploying publishes board power as schema.org JSON-LD on each GPU's
+   detail page, and not at all on the list page. Reading it rather than
+   hard-coding a table means the figure is attributable and moves when the
+   source moves — the alternative was a constant in this repo that would
+   silently rot, and whose A100 value a human would very likely have written
+   as the 400 W SXM part when getdeploying publishes the 300 W PCIe one.
+
+   Every failure path here lands on a blank cell. None of them may produce a
+   number, and none of them may fail the request: prices come from the list
+   page and must survive a detail-page outage untouched.
+   ───────────────────────────────────────────────────────────────────── */
+
+const LD_JSON_RE = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+
+// Every page wraps its nodes in @graph — a parser reading the root as a
+// Product matches nothing. Verified on all six pages: the root keys are
+// ["@context","@graph"] with BreadcrumbList, Product and FAQPage inside.
+function ldNodes(doc) {
+  if (Array.isArray(doc)) return doc;
+  if (doc && Array.isArray(doc['@graph'])) return doc['@graph'];
+  return doc ? [doc] : [];
+}
+
+// Values arrive as strings with a unit and a thousands separator: "700 W",
+// "1,000 W". Anything that is not <number> W is refused rather than coerced.
+export function parseWatts(value) {
+  if (typeof value !== 'string') return null;
+  const m = /^\s*([\d,]+(?:\.\d+)?)\s*W\s*$/i.exec(value);
+  if (!m) return null;
+  const n = Number(m[1].replace(/,/g, ''));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// getdeploying names these "Nvidia H100 Cloud GPU" (verified on all six).
+// Accept that exact shape and nothing else. A prefix test is NOT enough: this
+// upstream publishes a specification variant per page, so a slug that ever
+// resolved to "Nvidia H100 NVL Cloud GPU" would pass startsWith and staple the
+// NVL board power onto the H100 median price — a wrong number under a right
+// label, which is the one failure this repo refuses.
+const PRODUCT_SUFFIX = ' Cloud GPU';
+export function productNameMatches(name, expectedSku) {
+  if (typeof name !== 'string') return false;
+  const bare = name.endsWith(PRODUCT_SUFFIX) ? name.slice(0, -PRODUCT_SUFFIX.length) : name;
+  return bare.trim() === expectedSku;
+}
+
+// The price is per GPU ("USD per GPU per hour, on-demand" on every page). The
+// derived $/kW divides by a per-GPU wattage, so if the upstream ever changes
+// that basis — to a per-node or per-superchip price — the division silently
+// rescales. GB200 is the live example: 1,200 W is its per-GPU figure while the
+// superchip is ~2,700 W. So the basis is checked, and a page that stops saying
+// per GPU yields no watts at all rather than a quietly halved ratio.
+const PER_GPU_OFFER = 'usd per gpu per hour';
+function offerIsPerGpu(node) {
+  const offers = node && node.offers;
+  const list = Array.isArray(offers) ? offers : offers ? [offers] : [];
+  return list.some(o => String((o && o.description) || '').toLowerCase().startsWith(PER_GPU_OFFER));
+}
+
+/**
+ * { watts, variant } for `expectedSku` from a detail page's JSON-LD, or null.
+ *
+ * `variant` is getdeploying's own "Specification variant" string where it
+ * publishes one (H100 "H100 SXM", A100 "A100 PCIe"; H200, B200, GB200 and L40S
+ * publish none today). It is carried because board power is form-factor
+ * dependent and the figure cannot be honestly attributed without it.
+ *
+ * The block body is NOT entity-decoded: inside a <script> the content is raw
+ * JSON, and decoding &amp; or &quot; there would corrupt it.
+ */
+export function boardPowerFromLdJson(html, expectedSku) {
+  LD_JSON_RE.lastIndex = 0;
+  let m;
+  while ((m = LD_JSON_RE.exec(html)) !== null) {
+    let doc;
+    try { doc = JSON.parse(m[1]); } catch { continue; }
+    for (const node of ldNodes(doc)) {
+      if (!node || node['@type'] !== 'Product') continue;
+      if (!productNameMatches(node.name, expectedSku)) continue;
+      if (!offerIsPerGpu(node)) return null;
+      const props = Array.isArray(node.additionalProperty) ? node.additionalProperty : [];
+      const pick = (wanted) => {
+        for (const p of props) {
+          if (!p || p['@type'] !== 'PropertyValue') continue;
+          if (String(p.name == null ? '' : p.name).trim().toLowerCase() !== wanted) continue;
+          return p.value;
+        }
+        return null;
+      };
+      const watts = parseWatts(pick('board power'));
+      if (watts == null) return null;
+      const v = pick('specification variant');
+      return { watts, variant: typeof v === 'string' && v.trim() ? v.trim() : null };
+    }
+  }
+  return null;
+}
+
+// Read only the head of the document: the ld+json block sits early and the
+// pages are ~800 KB.
+async function readHead(resp, maxBytes) {
+  // Fall back to a full read rather than losing the field — if getReader() or
+  // cancel() behaves differently on the Workers runtime than in Node, the cost
+  // is bandwidth, not six blank cells.
+  let reader;
+  try {
+    if (!resp.body) return await resp.text();
+    reader = resp.body.getReader();
+  } catch {
+    return await resp.text();
+  }
+  const chunks = [];
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+  } finally {
+    try { await reader.cancel(); } catch { /* already closed */ }
+  }
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.length; }
+  return new TextDecoder('utf-8').decode(buf);
+}
+
+async function fetchOneBoardPower(sku) {
+  try {
+    const resp = await fetch(DETAIL_BASE + sku.slug, {
+      headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml' },
+      signal: AbortSignal.timeout(DETAIL_TIMEOUT_MS),
+    });
+    if (!resp.ok) return { sku: sku.name, found: null, error: 'http_' + resp.status };
+    const found = boardPowerFromLdJson(await readHead(resp, DETAIL_HEAD_BYTES), sku.name);
+    return found == null
+      ? { sku: sku.name, found: null, error: 'no_board_power' }
+      : { sku: sku.name, found, error: null };
+  } catch (err) {
+    return { sku: sku.name, found: null, error: (err && err.name) || 'fetch_error' };
+  }
+}
+
+async function fetchBoardPower() {
+  const bySku = new Map();
+  const errors = [];
+  for (let i = 0; i < GPU_TRACKED_SKUS.length; i += DETAIL_CONCURRENCY) {
+    const batch = GPU_TRACKED_SKUS.slice(i, i + DETAIL_CONCURRENCY);
+    const settled = await Promise.all(batch.map(fetchOneBoardPower));
+    for (const r of settled) {
+      if (r.found) bySku.set(r.sku, r.found);
+      else errors.push({ sku: r.sku, error: r.error });
+    }
+  }
+  return { bySku, requested: GPU_TRACKED_SKUS.length, resolved: bySku.size, errors };
+}
+
+function withBoardPower(row, bySku) {
+  const found = bySku.get(row.gpuModel) || null;
+  const watts = found ? found.watts : null;
+  const price = row.dailyPrice;
+  return {
+    ...row,
+    // Board power exactly as published by getdeploying on this SKU's page.
+    boardPowerWatts: watts,
+    // getdeploying's own "Specification variant", or null where it publishes
+    // none. Board power is form-factor dependent — their A100 page says
+    // "A100 PCIe" at 300 W where SXM is 400 W, their H100 page says "H100 SXM"
+    // — so this is what lets the UI attribute the figure rather than a comment
+    // in this file asserting it once and rotting.
+    boardPowerVariant: found ? found.variant : null,
+    // $/hr per kilowatt of RATED board power: the hourly rental price of a unit
+    // of installed power capacity. NOT an electricity cost, and nothing
+    // downstream may label it as one. Both sides denominate one GPU, checked
+    // rather than assumed (see offerIsPerGpu).
+    pricePerKilowattHour:
+      price != null && watts != null ? Math.round((price / (watts / 1000)) * 100) / 100 : null,
+  };
 }
 
 export async function onRequestOptions() {
