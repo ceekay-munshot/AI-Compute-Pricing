@@ -25,6 +25,13 @@
  * makes the parser resilient to presentation tweaks upstream.
  */
 
+// The source has published this listing three different ways and the price moved
+// between fields each time. _gpu-price-basis.js is the single rule for which field
+// holds today's measure and what that measure IS; the history endpoint normalizes
+// with it on the way in for exactly the same reason. Resolving here means the live
+// table, the KPI cards and the workbook cannot drift into three different answers.
+import { normalizeDailyPoint } from './_gpu-price-basis.js';
+
 const SOURCE_URL = 'https://getdeploying.com/gpus';
 
 export async function onRequestGet() {
@@ -99,7 +106,10 @@ function parseRows(html) {
     const end = rest.toLowerCase().indexOf(closeTag);
     const block = end === -1 ? rest : rest.slice(0, end);
     const parsed = parseRow(block);
-    if (parsed) rows.push(parsed);
+    // minPricePerHour / maxPricePerHour / medianPricePerHour are left exactly as
+    // parsed — the raw capture stays the evidence — and dailyBasis records which
+    // of them the headline came from.
+    if (parsed) rows.push(normalizeDailyPoint(parsed));
   }
   return rows;
 }

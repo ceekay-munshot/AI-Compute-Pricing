@@ -346,3 +346,26 @@ test('the reported Apr→Sep H100 history contains no fabricated jump', () => {
   const likeForLike = pctChange(months['2026-08'].headlinePricePerHour, months['2026-07'].alternatePricePerHour);
   assert.ok(Math.abs(likeForLike) < 20, 'like-for-like Jul→Aug should be modest, got ' + likeForLike);
 });
+
+/**
+ * The live listing endpoint now normalizes every scraped row through this module,
+ * so the shape it produces has to resolve. A scraped row carries none of the
+ * midpoint/spread keys a captured KV point has, and for a while every price cell
+ * on the dashboard read "—" because the table went looking for a vendor range the
+ * source had stopped publishing.
+ */
+test('a live scraped row carries no midpoint/spread keys at all and still resolves', () => {
+  const live = {
+    gpuModel: 'Nvidia H100',
+    minPricePerHour: null,
+    maxPricePerHour: null,
+    medianPricePerHour: 3.3775,
+    providerCount: 54,
+  };
+  const n = normalizeDailyPoint(live);
+  assert.equal(n.dailyBasis, BASIS_MEDIAN);
+  assert.equal(n.dailyPrice, 3.3775);
+  assert.equal(n.basisRemapped, false);
+  // The era-2 rescue must not fire just because the optional keys are absent.
+  assert.equal(isSingleValueInMaxField(live), false);
+});

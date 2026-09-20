@@ -1543,7 +1543,7 @@ function GPUHardwarePricingTab(){
       <div style={{display:"flex",gap:4,marginBottom:14,borderBottom:"0.5px solid #e5e7eb",paddingBottom:0}}>
         {[
           {id:"financial",label:"Financial Correlation",sub:"period averages · QoQ · YoY"},
-          {id:"infra",    label:"Infra Monitoring",     sub:"live spot · quarter-close · operational history"},
+          {id:"infra",    label:"Infra Monitoring",     sub:"live pricing · quarter-close · operational history"},
         ].map(t=>{
           const active=gpuSubtab===t.id;
           return(
@@ -1615,18 +1615,42 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
 
   const kpiCards=GPU_KPI_SKUS.map(sku=>{
     const r=byName[sku];
-    if(!r||r.minPricePerHour==null)return null;
+    // No card when the SKU is absent from the feed entirely — an empty card would
+    // claim we track something we do not. A SKU that IS in the feed but carries no
+    // price keeps its card and shows a dash, so "not tracked" and "tracked,
+    // unpriced" stay distinguishable instead of both being silence. Guarding on
+    // minPricePerHour is what made all four cards vanish once the source stopped
+    // publishing a vendor range.
+    if(!r)return null;
     const short=sku.replace(/^Nvidia\s+/i,"");
+    const basis=r.dailyBasis?FIN_BASIS_SHORT[r.dailyBasis]:null;
     return{
-      sku,label:"Live cheapest "+short+" $/hr",
-      value:fmtUSD(r.minPricePerHour),
-      sub:r.providerCount?r.providerCount+" providers":null,
+      // "cheapest" was only true of the old floor measure. The label now names
+      // whichever measure the row actually carries.
+      sku,label:short+(basis?" "+basis:"")+" $/hr",
+      value:fmtUSD(r.dailyPrice),
+      // Says what this feed shows, not what the source did: a row can be priceless
+      // because the source omitted a price or because the parser missed one, and
+      // the two are indistinguishable from here.
+      sub:r.dailyPrice==null?"no price in this feed"
+        :(r.providerCount?"across "+r.providerCount+" providers":null),
     };
   }).filter(Boolean);
 
   const totalProviders=rows.reduce((m,r)=>Math.max(m,r.providerCount||0),0);
   const modelCount=rows.length;
   const tableRows=GPU_STRATEGIC_ORDER.map(n=>byName[n]).filter(Boolean);
+
+  // The source has published this listing as a vendor min-max range and as a single
+  // median, and those are different statistics. The column is NAMED from what the
+  // rows actually carry rather than hard-coded, so a change of measure renames the
+  // column instead of printing a median under a label that says floor. Null when
+  // the rows disagree — then each row states its own.
+  const tableBases=new Set(tableRows.map(r=>r.dailyBasis).filter(Boolean));
+  const tableBasis=tableBases.size===1?Array.from(tableBases)[0]:null;
+  const tableBasisHeading=tableBasis
+    ?FIN_BASIS_SHORT[tableBasis].replace(/^./,c=>c.toUpperCase())+"\u00a0$/hr"
+    :"$/hr";
 
   return(
     <>
@@ -1638,9 +1662,9 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
 
       {/* Title + subtitle */}
       <div style={{marginBottom:12}}>
-        <div style={{fontSize:14,fontWeight:700,color:"#111827",lineHeight:1.3}}>Live spot minimums, quarter-close history, and vendor table</div>
+        <div style={{fontSize:14,fontWeight:700,color:"#111827",lineHeight:1.3}}>Live provider pricing, quarter-close history, and vendor table</div>
         <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>
-          Current cheapest $/hr per SKU across 42+ providers · operational history uses quarter-close (last real snapshot in quarter).
+          Current $/hr per SKU across the providers listing it · operational history uses quarter-close (last real snapshot in quarter).
           {updatedTxt&&<> · <b style={{color:"#6b7280",fontWeight:600}}>Source updated {updatedTxt}</b></>}
         </div>
       </div>
@@ -1668,7 +1692,7 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
           {tableRows.length>0&&(
             <div style={{border:"0.5px solid #e5e7eb",borderRadius:8,overflow:"hidden",marginBottom:14,background:"#fff"}}>
               <div style={{padding:"9px 14px",borderBottom:"0.5px solid #f3f4f6",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <span style={{fontSize:11,fontWeight:600,color:"#111827"}}>Strategic SKU comparison · live spot</span>
+                <span style={{fontSize:11,fontWeight:600,color:"#111827"}}>Strategic SKU comparison</span>
                 <span style={{fontSize:10,color:"#9ca3af"}}>ordered by decision weight · training → inference</span>
               </div>
               <div style={{overflowX:"auto"}}>
@@ -1677,8 +1701,7 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
                     <tr style={{background:"#fafafa"}}>
                       <th style={gpuTh}>GPU</th>
                       <th style={gpuTh}>VRAM</th>
-                      <th style={{...gpuTh,textAlign:"right"}}>Live&nbsp;lowest&nbsp;$/hr</th>
-                      <th style={{...gpuTh,textAlign:"right"}}>Live&nbsp;highest&nbsp;$/hr</th>
+                      <th style={{...gpuTh,textAlign:"right"}} title={tableBasis?"Measured as the "+FIN_BASIS_LABEL[tableBasis]:undefined}>{tableBasisHeading}</th>
                       <th style={{...gpuTh,textAlign:"right"}}>Providers</th>
                     </tr>
                   </thead>
@@ -1687,8 +1710,11 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
                       <tr key={r.gpuModel} style={{borderTop:"0.5px solid #f3f4f6"}}>
                         <td style={gpuTd}><span style={{fontWeight:600,color:"#111827"}}>{r.gpuModel}</span></td>
                         <td style={{...gpuTd,color:"#6b7280"}}>{r.vram||"—"}</td>
-                        <td style={{...gpuTd,textAlign:"right",color:"#059669",fontWeight:600}}>{fmtUSD(r.minPricePerHour)}</td>
-                        <td style={{...gpuTd,textAlign:"right",color:"#374151"}}>{fmtUSD(r.maxPricePerHour)}</td>
+                        <td style={{...gpuTd,textAlign:"right",color:"#111827",fontWeight:600}}
+                            title={r.dailyBasis?"Measured as the "+FIN_BASIS_LABEL[r.dailyBasis]:undefined}>
+                          {fmtUSD(r.dailyPrice)}
+                          {!tableBasis&&r.dailyBasis&&<div style={{fontSize:9,fontWeight:500,color:r.dailyBasis==="median"?"#1d4ed8":"#9ca3af"}}>{FIN_BASIS_SHORT[r.dailyBasis]}</div>}
+                        </td>
                         <td style={{...gpuTd,textAlign:"right",color:"#6b7280"}}>{r.providerCount??"—"}</td>
                       </tr>
                     ))}
