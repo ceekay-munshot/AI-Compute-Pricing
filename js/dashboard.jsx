@@ -1645,7 +1645,28 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
 
   const totalProviders=rows.reduce((m,r)=>Math.max(m,r.providerCount||0),0);
   const modelCount=rows.length;
-  const tableRows=GPU_STRATEGIC_ORDER.map(n=>byName[n]).filter(Boolean);
+  // Every model the source prices, not a shortlist. The feed carries ~107 and
+  // the table used to show six of them, which is why the "GPU models tracked"
+  // card above could read 107 over a six-row table — and why Nvidia B300, on
+  // more providers than GB200, was missing entirely while GB200 was shown.
+  //
+  // Order still leads with the strategic SKUs, so the rows most people come
+  // for stay at the top; everything else follows by class, then by how many
+  // providers list it, which is the best available proxy for how real a price
+  // is. Models the source carries but does not price are left out and counted
+  // underneath rather than padding the table with dashes.
+  const CLASS_ORDER={"Data Center":0,"Workstation":1,"Consumer":2};
+  const stratIdx=new Map(GPU_STRATEGIC_ORDER.map((n,i)=>[n,i]));
+  const pricedRows=rows.filter(r=>r.dailyPrice!=null);
+  const tableRows=[...pricedRows].sort((a,b)=>{
+    const sa=stratIdx.has(a.gpuModel)?stratIdx.get(a.gpuModel):1e6;
+    const sb=stratIdx.has(b.gpuModel)?stratIdx.get(b.gpuModel):1e6;
+    if(sa!==sb)return sa-sb;
+    const ca=CLASS_ORDER[a.category]??9, cb=CLASS_ORDER[b.category]??9;
+    if(ca!==cb)return ca-cb;
+    return (b.providerCount||0)-(a.providerCount||0);
+  });
+  const unpricedCount=rows.length-pricedRows.length;
 
   // The source has published this listing as a vendor min-max range and as a single
   // median, and those are different statistics. The column is NAMED from what the
@@ -1698,14 +1719,15 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
           {tableRows.length>0&&(
             <div style={{border:"0.5px solid #e5e7eb",borderRadius:8,overflow:"hidden",marginBottom:14,background:"#fff"}}>
               <div style={{padding:"9px 14px",borderBottom:"0.5px solid #f3f4f6",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <span style={{fontSize:11,fontWeight:600,color:"#111827"}}>Strategic SKU comparison</span>
-                <span style={{fontSize:10,color:"#9ca3af"}}>ordered by decision weight · training → inference</span>
+                <span style={{fontSize:11,fontWeight:600,color:"#111827"}}>All priced GPUs · {tableRows.length}</span>
+                <span style={{fontSize:10,color:"#9ca3af"}}>strategic SKUs first, then by class and provider breadth</span>
               </div>
               <div style={{overflowX:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                   <thead>
                     <tr style={{background:"#fafafa"}}>
                       <th style={gpuTh}>GPU</th>
+                      <th style={gpuTh}>Class</th>
                       <th style={gpuTh}>VRAM</th>
                       <th style={{...gpuTh,textAlign:"right"}} title={tableBasis?"Measured as the "+FIN_BASIS_LABEL[tableBasis]:undefined}>{tableBasisHeading}</th>
                       <th style={{...gpuTh,textAlign:"right"}}
@@ -1721,6 +1743,7 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
                     {tableRows.map(r=>(
                       <tr key={r.gpuModel} style={{borderTop:"0.5px solid #f3f4f6"}}>
                         <td style={gpuTd}><span style={{fontWeight:600,color:"#111827"}}>{r.gpuModel}</span></td>
+                        <td style={{...gpuTd,color:"#9ca3af",fontSize:10}}>{r.category||"—"}</td>
                         <td style={{...gpuTd,color:"#6b7280"}}>{r.vram||"—"}</td>
                         <td style={{...gpuTd,textAlign:"right",color:"#111827",fontWeight:600}}
                             title={r.dailyBasis?"Measured as the "+FIN_BASIS_LABEL[r.dailyBasis]:undefined}>
@@ -1746,6 +1769,11 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
                 </table>
               </div>
               <div style={{padding:"8px 14px",borderTop:"0.5px solid #f3f4f6",fontSize:10,color:"#9ca3af",lineHeight:1.5}}>
+                {unpricedCount>0&&<>A further <b style={{color:"#6b7280",fontWeight:600}}>{unpricedCount}</b> {unpricedCount===1?"model is":"models are"} listed
+                by the source with no price, and {unpricedCount===1?"is":"are"} not shown. </>}
+                A blank in the $/kW&#8209;hr column means that card's rated power has not been read yet — the figures fill in
+                over the first couple of hours after a deploy, a few models at a time, because the source refuses bulk fetching.
+                {" "}
                 <b style={{color:"#6b7280",fontWeight:600}}>$/kW&#8209;hr</b> is the hourly price divided by the card's rated
                 board power — what a unit of installed power capacity costs to rent. It is <b style={{color:"#6b7280",fontWeight:600}}>not
                 an electricity cost</b>. Read each row on its own: board power is a nameplate figure published per card by

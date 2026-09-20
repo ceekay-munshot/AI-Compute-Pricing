@@ -55,6 +55,29 @@ const DETAIL_TIMEOUT_MS = 6000;
 // connections, so 1 list + 3 detail leaves headroom and nothing queues.
 const DETAIL_CONCURRENCY = 3;
 
+// Board power is wanted for every model in the listing — 107 of them — and it
+// only exists on each model's own page. Fetching 107 pages per cache miss is
+// not an option: the source rate-limits, and a burst like that returns 403 for
+// EVERY page including the listing, which would take the whole GPU tab down
+// rather than just the watt column (observed first-hand while building this).
+// Cloudflare also caps a request's outbound subrequests.
+//
+// So the figures accumulate instead. Each miss tops up a few models, each
+// result is cached on its own for a week, and within a couple of hours every
+// model carries a wattage — with the strategic SKUs filled first so the rows
+// people actually look at are never the ones waiting. A card's rated power
+// does not change; only the set of cards does.
+const DETAIL_PER_REQUEST = 6;
+const POWER_TTL = 7 * 24 * 3600;
+
+// getdeploying rate-limits, and when it does it answers 403 to EVERYTHING,
+// including the listing — observed repeatedly while this was being built. The
+// old behaviour on that was a 502 and an empty GPU tab. Prices that are a few
+// minutes old are worth far more to a reader than no prices at all, so the last
+// good listing is kept for a day and served when the source refuses, labelled
+// as stale rather than passed off as current.
+const LAST_GOOD_TTL = 24 * 3600;
+
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
@@ -63,19 +86,49 @@ export async function onRequestGet(context) {
   return withEdgeCache(
     context,
     { params: {}, ttl: EDGE_TTL, browserTtl: 0 },
-    () => buildGpuPricing(),
+    () => buildGpuPricing(context),
   );
 }
 
-async function buildGpuPricing() {
+function lastGoodKey(baseUrl) {
+  return new Request(new URL('/__gpu-listing-last-good', baseUrl).toString(), { method: 'GET' });
+}
+
+// The most recent listing that parsed, or null. Never throws: a failure to read
+// the fallback must not turn a degraded response into no response.
+async function readLastGood(baseUrl) {
   try {
-    const [list, power] = await Promise.all([fetchList(), fetchBoardPower()]);
+    const hit = await caches.default.match(lastGoodKey(baseUrl));
+    return hit ? await hit.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function buildGpuPricing(context) {
+  try {
+    const list = await fetchList();
 
     if (!list.ok) {
+      // Serve the last good listing rather than an empty tab. It is marked
+      // stale and carries the time it was captured, so nothing here presents
+      // old prices as current.
+      const stale = await readLastGood(context.request.url);
+      if (stale) {
+        return json(
+          { ...stale, stale: true, staleReason: 'upstream_' + list.status, servedAt: new Date().toISOString() },
+          200,
+          'public, max-age=60, s-maxage=60',
+        );
+      }
       return json({ ok: false, error: 'upstream_' + list.status }, 502);
     }
 
-    const rows = parseRows(list.html).map(r => withBoardPower(r, power.bySku));
+    // Board power needs the parsed rows to know which models exist at all, so
+    // it runs after the listing rather than alongside it.
+    const parsed = parseRows(list.html);
+    const power = await fetchBoardPower(context, parsed);
+    const rows = parsed.map(r => withBoardPower(r, power.bySku));
     const sourceUpdatedAt = parseUpdatedAt(list.html);
 
     // A board-power outage deliberately does NOT mark this no-store. Blank watt
@@ -84,20 +137,41 @@ async function buildGpuPricing() {
     // the outage lasted, which is worse than the state this replaces. Prices
     // are unaffected — they come from the list page, which succeeded or this
     // line was never reached.
-    return json(
-      {
+    const payload = {
         ok: true,
         sourceUrl: SOURCE_URL,
         sourceUpdatedAt,
         fetchedAt: new Date().toISOString(),
         count: rows.length,
-        boardPower: { requested: power.requested, resolved: power.resolved, errors: power.errors },
+        // Operator-facing only; nothing here is rendered. `pending` counts
+        // models still waiting for a first fetch — it should fall to 0 within
+        // a couple of hours of a deploy and stay there.
+        boardPower: { known: power.known, total: power.total, pending: power.pending, errors: power.errors },
         rows,
-      },
-      200,
-      'public, max-age=300, s-maxage=600'
-    );
+    };
+
+    // Keep this as the fallback for the next time the source refuses. Stored
+    // only when rows actually parsed, so an empty parse can never become the
+    // thing we fall back to.
+    if (rows.length) {
+      context.waitUntil(caches.default.put(
+        lastGoodKey(context.request.url),
+        new Response(JSON.stringify(payload), {
+          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=' + LAST_GOOD_TTL },
+        }),
+      ));
+    }
+
+    return json(payload, 200, 'public, max-age=300, s-maxage=600');
   } catch (err) {
+    const stale = await readLastGood(context.request.url);
+    if (stale) {
+      return json(
+        { ...stale, stale: true, staleReason: err.message || 'parse_error', servedAt: new Date().toISOString() },
+        200,
+        'public, max-age=60, s-maxage=60',
+      );
+    }
     return json({ ok: false, error: err.message || 'parse_error' }, 502);
   }
 }
@@ -258,18 +332,82 @@ async function fetchOneBoardPower(sku) {
   }
 }
 
-async function fetchBoardPower() {
+// Board power is cached per model, on our own origin, so one model's figure
+// survives independently of the listing response it happened to arrive with.
+function powerCacheKey(baseUrl, slug) {
+  return new Request(new URL('/__board-power/' + encodeURIComponent(slug), baseUrl).toString(), { method: 'GET' });
+}
+
+function slugFromDetailUrl(url) {
+  if (typeof url !== 'string') return null;
+  const m = /\/gpus\/([^/?#]+)/.exec(url);
+  return m ? m[1] : null;
+}
+
+/**
+ * Board power for as many models as are already known, plus a few fresh ones.
+ *
+ * Returns a map keyed by gpuModel. A model that has never been fetched is
+ * simply absent, which renders as a blank cell — never as a guess, and never
+ * as a reason to fail the listing.
+ */
+async function fetchBoardPower(context, rows) {
+  const cache = caches.default;
+  const baseUrl = context.request.url;
   const bySku = new Map();
   const errors = [];
-  for (let i = 0; i < GPU_TRACKED_SKUS.length; i += DETAIL_CONCURRENCY) {
-    const batch = GPU_TRACKED_SKUS.slice(i, i + DETAIL_CONCURRENCY);
-    const settled = await Promise.all(batch.map(fetchOneBoardPower));
+
+  // Fill order: the strategic SKUs first, then the models the most providers
+  // offer. A reader scanning the top of the table should not be the one
+  // looking at blanks while an obscure card gets its figure.
+  const priority = new Map(GPU_TRACKED_SKUS.map((s, i) => [s.name, i]));
+  const candidates = rows
+    .filter(r => slugFromDetailUrl(r.detailUrl))
+    .sort((a, b) => {
+      const pa = priority.has(a.gpuModel) ? priority.get(a.gpuModel) : 1e6;
+      const pb = priority.has(b.gpuModel) ? priority.get(b.gpuModel) : 1e6;
+      if (pa !== pb) return pa - pb;
+      return (b.providerCount || 0) - (a.providerCount || 0);
+    });
+
+  const misses = [];
+  for (const row of candidates) {
+    const slug = slugFromDetailUrl(row.detailUrl);
+    let hit = null;
+    try { hit = await cache.match(powerCacheKey(baseUrl, slug)); } catch { hit = null; }
+    if (hit) {
+      try {
+        const found = await hit.json();
+        if (found && typeof found.watts === 'number') { bySku.set(row.gpuModel, found); continue; }
+      } catch { /* fall through to a refetch */ }
+    }
+    misses.push({ name: row.gpuModel, slug });
+  }
+
+  const topUp = misses.slice(0, DETAIL_PER_REQUEST);
+  for (let i = 0; i < topUp.length; i += DETAIL_CONCURRENCY) {
+    const batch = topUp.slice(i, i + DETAIL_CONCURRENCY);
+    const settled = await Promise.all(batch.map(sku => fetchOneBoardPower(sku)));
     for (const r of settled) {
-      if (r.found) bySku.set(r.sku, r.found);
-      else errors.push({ sku: r.sku, error: r.error });
+      if (!r.found) { errors.push({ sku: r.sku, error: r.error }); continue; }
+      bySku.set(r.sku, r.found);
+      const slug = (topUp.find(t => t.name === r.sku) || {}).slug;
+      if (slug) {
+        const body = new Response(JSON.stringify(r.found), {
+          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=' + POWER_TTL },
+        });
+        context.waitUntil(cache.put(powerCacheKey(baseUrl, slug), body));
+      }
     }
   }
-  return { bySku, requested: GPU_TRACKED_SKUS.length, resolved: bySku.size, errors };
+
+  return {
+    bySku,
+    known: bySku.size,
+    total: candidates.length,
+    pending: Math.max(0, misses.length - topUp.length),
+    errors,
+  };
 }
 
 function withBoardPower(row, bySku) {
