@@ -1643,6 +1643,41 @@ function fmtUSD(v){
   return"$"+v.toFixed(2);
 }
 
+/* ─── GPU price capture note ─────────────────────────────────
+   Everything historical on this tab — period averages, quarter closes, the
+   daily table — is built from one GPU price capture a day. When that stops,
+   the history simply ends and nothing on screen says its last point is old;
+   when it misses a run of days, the periods around the hole rest on fewer
+   days than their labels suggest. Neither the 2026-08-22 → 2026-09-10 hole
+   nor the stop after 2026-09-16 was visible anywhere. The wider daily
+   capture kept running through both — only the GPU prices were missing — so
+   the wording names GPU prices, not the capture. When it counts as stopped
+   (over 3 days) and which holes matter (5+ days) are the server's decisions,
+   read from its data-quality block, not re-derived here. */
+function isoAddDays(iso,n){
+  const t=Date.parse(iso+"T00:00:00Z");
+  return isFinite(t)?new Date(t+n*86400000).toISOString().slice(0,10):iso;
+}
+function GPUCaptureNote({dq}){
+  if(!dq)return null;
+  const ago=n=>n!=null?" ("+n+" day"+(n===1?"":"s")+" ago)":"";
+  const lines=[];
+  if(dq.gpuFeedStale&&dq.latestGPUObservationDate){
+    lines.push(<><b style={{fontWeight:600}}>No GPU prices captured since {dq.latestGPUObservationDate}</b>{ago(dq.daysSinceLatestGPUObservation)}. The price history on this tab ends there — it is not a current reading.</>);
+  }else if(dq.priceFieldStale&&dq.latestPricedObservationDate){
+    lines.push(<><b style={{fontWeight:600}}>No new GPU price captured since {dq.latestPricedObservationDate}</b>{ago(dq.daysSinceLatestPricedObservation)}. The price history on this tab ends there — it is not a current reading.</>);
+  }
+  for(const g of (dq.significantCaptureGaps||[])){
+    lines.push(<><b style={{fontWeight:600}}>No GPU prices captured for {g.missingDays} days, {isoAddDays(g.afterDate,1)} to {isoAddDays(g.beforeDate,-1)}.</b> The months and quarters around it rest on fewer days than their length.</>);
+  }
+  if(!lines.length)return null;
+  return(
+    <div role="note" style={{background:"#fffbeb",border:"0.5px solid #fde68a",borderRadius:6,padding:"7px 11px",marginTop:8,fontSize:11,color:"#92400e",lineHeight:1.5}}>
+      {lines.map((l,i)=><div key={i}>{l}</div>)}
+    </div>
+  );
+}
+
 function GPUHardwarePricingTab(){
   const[err,setErr]=useState(false);
   const[data,setData]=useState(null);
@@ -1718,6 +1753,10 @@ function GPUHardwarePricingTab(){
         <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>
           Two lenses on the same strategic GPU basket · daily snapshots underneath captured since <b style={{color:"#6b7280",fontWeight:600}}>{fHist?.trackingSinceRealDate||"—"}</b>
         </div>
+        {/* Above the subtab switcher so it covers both lenses: a stopped
+            capture freezes the financial matrix and the operational history
+            alike. */}
+        <GPUCaptureNote dq={fHist?.dataQuality}/>
       </div>
 
       {/* Subtab switcher */}
@@ -1823,7 +1862,12 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,listingOld,listingAt,
     };
   }).filter(Boolean);
 
-  const totalProviders=rows.reduce((m,r)=>Math.max(m,r.providerCount||0),0);
+  // The listing gives each model a provider COUNT, never the providers' names,
+  // so how many distinct providers there are across models cannot be known
+  // from it. "Providers tracked 54+ · across all SKUs" was the single largest
+  // count (H100's) wearing a total's label. What the data does support is the
+  // widest single listing, named as that.
+  const widest=rows.reduce((b,r)=>(r.providerCount||0)>(b?.providerCount||0)?r:b,null);
   const modelCount=rows.length;
   // Every model the source prices, not a shortlist. The feed carries ~107 and
   // the table used to show six of them, which is why the "GPU models tracked"
@@ -1923,7 +1967,7 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,listingOld,listingAt,
             {kpiCards.map(c=>(
               <KBox key={c.sku} label={c.label} value={c.value} sub={c.sub} bg="#ecfeff" fg="#0e7490"/>
             ))}
-            <KBox label="Providers tracked"       value={totalProviders?totalProviders+"+":"—"} sub="across all SKUs"      bg="#f0fdf4" fg="#059669"/>
+            <KBox label="Most providers on one GPU" value={widest?.providerCount||"—"} sub={widest?widest.gpuModel+" · not a total across GPUs":null} bg="#f0fdf4" fg="#059669"/>
             <KBox label="GPU models tracked"      value={modelCount||"—"}                       sub="parsed from source" bg="#eff6ff" fg="#1d4ed8"/>
           </div>
 
@@ -3206,6 +3250,15 @@ function GPUQuarterlyBlock({qHist,qHistErr}){
 
   const bootstrap=mode==="insufficient_history_bootstrap";
 
+  // The matrix heading names the measure only when every quarter on screen is
+  // on one. The source switched from a range floor to a vendor median on
+  // 2026-07-28, so Q2 closes on the floor and Q3 on the median: a heading that
+  // says "min" (or "median") is wrong for half the cells, and each cell
+  // already names its own.
+  const matrixBases=new Set();
+  for(const sku of trackedSKUs)for(const q of (series[sku]||[]))if(q.priceBasis)matrixBases.add(q.priceBasis);
+  const matrixBasis=matrixBases.size===1?[...matrixBases][0]:null;
+
   return(
     <div>
       {/* Header line — always rendered */}
@@ -3251,12 +3304,17 @@ function GPUQuarterlyBlock({qHist,qHistErr}){
         : <QoQComparisonTable trackedSKUs={trackedSKUs} qoq={qoq} series={series} signals={signals} currentQuarterBySku={currentQuarterBySku}/>
       }
 
-      {/* Quarter matrix — close min $/hr by SKU × quarter */}
+      {/* Quarter matrix — close $/hr by SKU × quarter, each on its own measure */}
       {quarters.length>=1&&(
         <div style={{border:"0.5px solid #e5e7eb",borderRadius:8,overflow:"hidden",background:"#fff",marginBottom:10}}>
-          <div style={{padding:"9px 14px",borderBottom:"0.5px solid #f3f4f6",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span style={{fontSize:11,fontWeight:600,color:"#111827"}}>Quarter-close min $/hr · SKU × quarter matrix</span>
-            <span style={{fontSize:10,color:"#9ca3af"}}>quarter average shown in parentheses · QTD quarters marked</span>
+          <div style={{padding:"9px 14px",borderBottom:"0.5px solid #f3f4f6",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            <span style={{fontSize:11,fontWeight:600,color:"#111827"}}
+                  title={matrixBasis?"Measured as the "+FIN_BASIS_LABEL[matrixBasis]:undefined}>
+              Quarter-close {matrixBasis?FIN_BASIS_SHORT[matrixBasis]+" ":""}$/hr · SKU × quarter matrix
+            </span>
+            <span style={{fontSize:10,color:"#9ca3af"}}>
+              {matrixBasis?"":"measure differs by quarter and is named in each cell · "}quarter average underneath · QTD quarters marked
+            </span>
           </div>
           <div style={{overflowX:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
@@ -3544,21 +3602,33 @@ function QoQComparisonTable({trackedSKUs,qoq,series,signals,currentQuarterBySku}
               const c=qoq[sku];
               const cur=currentQuarterBySku[sku];
               const coverageText=cur?(Math.round((cur.coverageRatioWithinQuarter||0)*100)+"% of "+cur.quarterDayCount+"d"):"—";
+              // Across the change of measure the two closes are different
+              // statistics. The QoQ cell is already blank; this puts the
+              // refusal into words, and stops the Trend cell calling a
+              // complete prior quarter "QTD only".
+              const basisWhy=c?.basisChanged
+                ?"Not comparable: "+c.priorQuarter+" closes on the "+FIN_BASIS_LABEL[c.priorBasis]+", "+c.currentQuarter+" on the "+FIN_BASIS_LABEL[c.currentBasis]+". The source changed what it publishes; the gap between the two is a change of measure, not a price move."
+                :null;
               const trendLabel=(()=>{
                 const sig=signals[sku];
-                if(!sig||sig==="insufficient-data")return <span style={{color:"#9ca3af"}}>QTD only</span>;
+                if(basisWhy)return <span style={{color:"#b45309"}} title={basisWhy}>measure changed</span>;
+                if(!sig||sig==="insufficient-data")return <span style={{color:"#9ca3af"}}>{c?.status==="ok"?"—":"QTD only"}</span>;
                 const color=sig==="loosening"?"#059669":sig==="tightening"?"#dc2626":"#6b7280";
                 return <span style={{color,fontWeight:600,textTransform:"capitalize"}}>{sig}</span>;
               })();
               return(
                 <tr key={sku} style={{borderTop:"0.5px solid #f3f4f6"}}>
                   <td style={gpuTd}><span style={{fontWeight:600,color:"#111827"}}>{sku}</span></td>
-                  <td style={{...gpuTd,textAlign:"right",color:"#374151"}}>{c?.priorClose!=null?"$"+c.priorClose.toFixed(2):"—"}</td>
+                  <td style={{...gpuTd,textAlign:"right",color:"#374151"}}>
+                    {c?.priorClose!=null?"$"+c.priorClose.toFixed(2):"—"}
+                    {c?.priorBasis&&<div style={{fontSize:9,fontWeight:500,color:c.priorBasis==="median"?"#1d4ed8":"#9ca3af"}}>{FIN_BASIS_SHORT[c.priorBasis]}</div>}
+                  </td>
                   <td style={{...gpuTd,textAlign:"right",color:"#059669",fontWeight:600}}>
                     {c?.currentClose!=null?"$"+c.currentClose.toFixed(2):(qClose(cur)!=null?"$"+qClose(cur).toFixed(2):"—")}
                     {(c?.currentIsQTD||cur?.isQTD)&&<span style={{fontSize:9,color:"#9ca3af",fontWeight:500,marginLeft:3}}>QTD</span>}
+                    {(c?.currentBasis||cur?.priceBasis)&&<div style={{fontSize:9,fontWeight:500,color:(c?.currentBasis||cur?.priceBasis)==="median"?"#1d4ed8":"#9ca3af"}}>{FIN_BASIS_SHORT[c?.currentBasis||cur?.priceBasis]}</div>}
                   </td>
-                  <td style={{...gpuTd,textAlign:"right"}}><QoQCell v={c?.qoqPct} suffix="%"/></td>
+                  <td style={{...gpuTd,textAlign:"right"}} title={basisWhy||undefined}><QoQCell v={c?.qoqPct} suffix="%"/></td>
                   <td style={{...gpuTd,textAlign:"right",color:"#6b7280"}}>{c?.priorProviders??"—"}</td>
                   <td style={{...gpuTd,textAlign:"right",color:"#374151"}}>{c?.currentProviders??cur?.quarterCloseProviderCount??"—"}</td>
                   <td style={{...gpuTd,textAlign:"right"}}><QoQCell v={c?.providerDelta} integer/></td>
@@ -3616,8 +3686,14 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
     );
   }
 
-  const since=hist.trackingSinceDate;
+  // This view reads a 60-capture window, so its earliest date is where the
+  // WINDOW opens, not where tracking began. Labelled "tracking since", it put
+  // 2026-07-23 on the same tab as the header's 2026-04-21. The start of
+  // tracking is stated once, in the tab header, from the full-history scan.
+  const viewFrom=hist.trackingSinceDate;
   const latest=hist.latestDate;
+  // Days whose capture actually holds GPU rows — the server no longer counts
+  // a capture that came back empty — so this matches the dates drawn.
   const days=hist.daysWithGPU||0;
   const d7=hist.comparisons?.d7||{};
   const d30=hist.comparisons?.d30||{};
@@ -3625,6 +3701,18 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
   const series=hist.series||{};
   const latestBySku=hist.latest||{};
   const trackedSKUs=hist.trackedSKUs||[];
+  // Prices come from the resolved headline (dailyPrice / dailyBasis), never
+  // minPricePerHour: the source stopped publishing a floor on 2026-07-28, so
+  // that field is empty for every recent day and the columns read as dashes
+  // while prices kept arriving. The column is named from the measure the
+  // latest points carry; if SKUs disagree, each cell names its own.
+  const latestBases=new Set(trackedSKUs.map(s=>latestBySku[s]?.dailyBasis).filter(Boolean));
+  const latestBasis=latestBases.size===1?[...latestBases][0]:null;
+  const latestPriceHeading="Latest "+(latestBasis?FIN_BASIS_SHORT[latestBasis]+" ":"")+"$/hr";
+  // Only the range→median change explains a blank spread; any other change
+  // (or a mixed day) must not put its date under that sentence.
+  const basisChangeDate=(hist.basisTimeline?.changes||[]).find(ch=>ch.from==="floor"&&ch.to==="median")?.effectiveDate||null;
+  const gapAfter=new Set((hist.significantCaptureGaps||[]).map(g=>g.afterDate));
 
   // Empty-state: index exists but no snapshots had a gpu block yet.
   if(!days){
@@ -3647,37 +3735,50 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
           <div>
             <div style={{...S.lbl,color:"#0e7490"}}>GPU Pricing History</div>
             <div style={{fontSize:11,color:"#9ca3af",marginTop:2}}>
-              Tracking since <b style={{color:"#6b7280",fontWeight:600}}>{since||"—"}</b>
-              {latest&&since&&latest!==since&&<> · latest <b style={{color:"#6b7280",fontWeight:600}}>{latest}</b></>}
-              {" · "}{days} snapshot{days===1?"":"s"} captured
+              Daily view from <b style={{color:"#6b7280",fontWeight:600}}>{viewFrom||"—"}</b>
+              {latest&&viewFrom&&latest!==viewFrom&&<> to <b style={{color:"#6b7280",fontWeight:600}}>{latest}</b></>}
+              {" · "}{days} day{days===1?"":"s"} captured
             </div>
           </div>
         </div>
       )}
       {hideHeader&&(
         <div style={{fontSize:11,color:"#9ca3af",marginBottom:8}}>
-          Raw daily view · tracking since <b style={{color:"#6b7280",fontWeight:600}}>{since||"—"}</b>
-          {latest&&since&&latest!==since&&<> · latest <b style={{color:"#6b7280",fontWeight:600}}>{latest}</b></>}
-          {" · "}{days} real snapshot{days===1?"":"s"}
+          Raw daily view · <b style={{color:"#6b7280",fontWeight:600}}>{viewFrom||"—"}</b>
+          {latest&&viewFrom&&latest!==viewFrom&&<> to <b style={{color:"#6b7280",fontWeight:600}}>{latest}</b></>}
+          {" · "}{days} day{days===1?"":"s"} captured
         </div>
       )}
 
-      {/* Trend cards — 7D change in cheapest $/hr per strategic SKU */}
+      {/* Trend cards — 7D change in the headline $/hr per strategic SKU */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:8,marginBottom:10}}>
         {GPU_HISTORY_TREND_SKUS.map(sku=>{
           const c=d7[sku];
           const latestPt=latestBySku[sku];
           const short=sku.replace(/^Nvidia\s+/i,"");
-          if(!c||c.status!=="ok"){
+          const nowTxt=latestPt?.dailyPrice!=null
+            ?"now $"+latestPt.dailyPrice.toFixed(2)+(latestPt.dailyBasis?" "+FIN_BASIS_SHORT[latestPt.dailyBasis]:"")
+            :null;
+          // Refused exactly as the table below refuses it. Across the capture
+          // gap the nearest earlier day is 26 days back, and printing that
+          // move — or its provider change — under "7D" is the mislabel.
+          const why=dailyDeltaRefusal(c,7,true);
+          if(why){
+            const sub=!c||c.status!=="ok"
+              ?"no capture a week before the latest yet"
+              :c.windowStretched
+                ?"nearest earlier capture is "+c.actualSpanDays+" days back ("+c.priorDate+")"
+                :"the price measure changed in between";
             return(
-              <div key={sku} style={{background:"#fafafa",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"10px 12px"}}>
+              <div key={sku} title={why} style={{background:"#fafafa",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"10px 12px"}}>
                 <div style={{...S.lbl,color:"#6b7280",fontSize:9}}>{short} · 7D change</div>
-                <div style={{fontSize:12,fontWeight:600,color:"#9ca3af",marginTop:4}}>not enough data yet</div>
-                <div style={{fontSize:10,color:"#9ca3af",marginTop:2}}>tracking since {since}</div>
+                <div style={{fontSize:12,fontWeight:600,color:"#9ca3af",marginTop:4}}>{!c||c.status!=="ok"?"not enough data yet":"no 7-day comparison"}</div>
+                <div style={{fontSize:10,color:"#9ca3af",marginTop:2}}>{sub}</div>
+                {nowTxt&&<div style={{fontSize:10,color:"#9ca3af",marginTop:2}}>{nowTxt}</div>}
               </div>
             );
           }
-          const pct=c.minDeltaPct;
+          const pct=c.priceDeltaPct;
           const providerDelta=c.providerDelta;
           const up=pct!=null&&pct>0;
           const down=pct!=null&&pct<0;
@@ -3695,10 +3796,10 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
               </div>
               <div style={{display:"flex",alignItems:"baseline",gap:6,marginTop:4}}>
                 <span style={{fontSize:16,fontWeight:700,color}}>{arrow}&nbsp;{pct==null?"—":(pct>0?"+":"")+pct.toFixed(1)+"%"}</span>
-                <span style={{fontSize:11,color:"#6b7280"}}>min $/hr</span>
+                <span style={{fontSize:11,color:"#6b7280"}}>{c.priceBasis?FIN_BASIS_SHORT[c.priceBasis]+" ":""}$/hr</span>
               </div>
               <div style={{fontSize:10,color:"#9ca3af",marginTop:3}}>
-                {latestPt?.minPricePerHour!=null?"now $"+latestPt.minPricePerHour.toFixed(2):"—"}
+                {nowTxt||"—"}
                 {providerDelta!=null&&<> · providers {providerDelta>0?"+":""}{providerDelta}</>}
               </div>
             </div>
@@ -3710,21 +3811,22 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
       <div style={{border:"0.5px solid #e5e7eb",borderRadius:8,overflow:"hidden",background:"#fff",marginBottom:10}}>
         <div style={{padding:"9px 14px",borderBottom:"0.5px solid #f3f4f6",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <span style={{fontSize:11,fontWeight:600,color:"#111827"}}>Strategic SKU history</span>
-          <span style={{fontSize:10,color:"#9ca3af"}}>latest vs 7D / 30D prior · loosening = more providers or lower floor</span>
+          <span style={{fontSize:10,color:"#9ca3af"}}>latest vs 7 / 30 days earlier · hover a blank for why · loosening = more providers or a lower price</span>
         </div>
         <div style={{overflowX:"auto"}}>
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
             <thead>
               <tr style={{background:"#fafafa"}}>
                 <th style={gpuTh}>GPU</th>
-                <th style={{...gpuTh,textAlign:"right"}}>Latest&nbsp;min&nbsp;$/hr</th>
+                <th style={{...gpuTh,textAlign:"right"}} title={latestBasis?"Measured as the "+FIN_BASIS_LABEL[latestBasis]:undefined}>{latestPriceHeading}</th>
                 <th style={{...gpuTh,textAlign:"right"}}>7D&nbsp;Δ</th>
                 <th style={{...gpuTh,textAlign:"right"}}>30D&nbsp;Δ</th>
                 <th style={{...gpuTh,textAlign:"right"}}>Providers</th>
                 <th style={{...gpuTh,textAlign:"right"}}>7D&nbsp;Δ&nbsp;providers</th>
-                <th style={{...gpuTh,textAlign:"right"}}>Spread×</th>
-                <th style={{...gpuTh,textAlign:"right"}}>Trend (60d)</th>
-                <th style={gpuTh}>Tracking since</th>
+                <th style={{...gpuTh,textAlign:"right"}}
+                    title={"Ceiling ÷ floor of the vendor price range."+(basisChangeDate?" The source publishes a single median instead of a range from "+basisChangeDate+", so later days have no spread.":"")}>Spread×</th>
+                <th style={{...gpuTh,textAlign:"right"}}
+                    title="Daily price on the latest measure across this view. Earlier days on a different measure are left out, and the line breaks where the daily capture has a gap.">Trend</th>
               </tr>
             </thead>
             <tbody>
@@ -3733,18 +3835,20 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
                 const latestPt=latestBySku[sku];
                 const c7=d7[sku];
                 const c30=d30[sku];
-                const firstDate=pts[0]?.date||null;
                 return(
                   <tr key={sku} style={{borderTop:"0.5px solid #f3f4f6"}}>
                     <td style={gpuTd}><span style={{fontWeight:600,color:"#111827"}}>{sku}</span></td>
-                    <td style={{...gpuTd,textAlign:"right",color:"#059669",fontWeight:600}}>{latestPt?.minPricePerHour!=null?"$"+latestPt.minPricePerHour.toFixed(2):"—"}</td>
-                    <td style={{...gpuTd,textAlign:"right"}}><DeltaCell c={c7} field="minDeltaPct" suffix="%"/></td>
-                    <td style={{...gpuTd,textAlign:"right"}}><DeltaCell c={c30} field="minDeltaPct" suffix="%"/></td>
+                    <td style={{...gpuTd,textAlign:"right",color:"#059669",fontWeight:600}}
+                        title={latestPt?.dailyBasis?"Measured as the "+FIN_BASIS_LABEL[latestPt.dailyBasis]+" · captured "+latestPt.date:undefined}>
+                      {latestPt?.dailyPrice!=null?"$"+latestPt.dailyPrice.toFixed(2):"—"}
+                      {!latestBasis&&latestPt?.dailyBasis&&<div style={{fontSize:9,fontWeight:500,color:latestPt.dailyBasis==="median"?"#1d4ed8":"#9ca3af"}}>{FIN_BASIS_SHORT[latestPt.dailyBasis]}</div>}
+                    </td>
+                    <td style={{...gpuTd,textAlign:"right"}}><DeltaCell c={c7} nDays={7} field="priceDeltaPct" suffix="%"/></td>
+                    <td style={{...gpuTd,textAlign:"right"}}><DeltaCell c={c30} nDays={30} field="priceDeltaPct" suffix="%"/></td>
                     <td style={{...gpuTd,textAlign:"right",color:"#374151"}}>{latestPt?.providerCount??"—"}</td>
-                    <td style={{...gpuTd,textAlign:"right"}}><DeltaCell c={c7} field="providerDelta" suffix="" integer/></td>
+                    <td style={{...gpuTd,textAlign:"right"}}><DeltaCell c={c7} nDays={7} field="providerDelta" suffix="" integer/></td>
                     <td style={{...gpuTd,textAlign:"right",color:"#6b7280"}}>{latestPt?.spreadMultiple?latestPt.spreadMultiple.toFixed(1)+"×":"—"}</td>
-                    <td style={{...gpuTd,textAlign:"right"}}><Sparkline pts={pts}/></td>
-                    <td style={{...gpuTd,color:"#9ca3af",fontSize:11}}>{firstDate||"—"}</td>
+                    <td style={{...gpuTd,textAlign:"right"}}><Sparkline pts={pts} gapAfter={gapAfter}/></td>
                   </tr>
                 );
               })}
@@ -3763,12 +3867,12 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
           const short=sku.replace(/^Nvidia\s+/i,"");
           if(sig==="loosening"){
             const parts=[];
-            if(c.minDeltaPct!=null&&c.minDeltaPct<=-2)parts.push("min "+c.minDeltaPct.toFixed(1)+"%");
+            if(c.priceDeltaPct!=null&&c.priceDeltaPct<=-2)parts.push((FIN_BASIS_SHORT[c.priceBasis]||"price")+" "+c.priceDeltaPct.toFixed(1)+"%");
             if(c.providerDelta!=null&&c.providerDelta>0)parts.push("+"+c.providerDelta+" providers");
             if(parts.length)msgs.push(short+" loosening ("+parts.join(" · ")+")");
           } else if(sig==="tightening"){
             const parts=[];
-            if(c.minDeltaPct!=null&&c.minDeltaPct>=2)parts.push("min +"+c.minDeltaPct.toFixed(1)+"%");
+            if(c.priceDeltaPct!=null&&c.priceDeltaPct>=2)parts.push((FIN_BASIS_SHORT[c.priceBasis]||"price")+" +"+c.priceDeltaPct.toFixed(1)+"%");
             if(c.providerDelta!=null&&c.providerDelta<0)parts.push(c.providerDelta+" providers");
             if(parts.length)msgs.push(short+" tightening ("+parts.join(" · ")+")");
           }
@@ -3784,9 +3888,29 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
   );
 }
 
-function DeltaCell({c,field,suffix,integer}){
-  if(!c||c.status!=="ok"||c[field]==null){
-    return <span style={{color:"#9ca3af"}}>—</span>;
+/* Why a 7D / 30D cell is blank, in words for its tooltip. Whether two days
+   make a comparison at all is the server's call — windowStretched (the
+   nearest earlier capture is far older than the window asked for) and
+   basisChanged (the two days measure different things). This only says so.
+   The table used to ignore windowStretched and print a 26-day provider move
+   under "7D Δ providers". */
+function dailyDeltaRefusal(c,nDays,isPrice){
+  if(!c||c.status!=="ok")return "No capture "+nDays+" or more days before the latest one yet.";
+  if(c.windowStretched){
+    return "No "+nDays+"-day comparison: the nearest capture "+nDays+" or more days before "+c.latestDate+" is "+c.priorDate+
+      ", "+c.actualSpanDays+" days earlier, because the daily capture has a gap.";
+  }
+  if(isPrice&&c.basisChanged){
+    return "Not comparable: "+c.priorDate+" is measured as the "+FIN_BASIS_LABEL[c.priorBasis]+", "+c.latestDate+" as the "+
+      FIN_BASIS_LABEL[c.latestBasis]+". The source changed what it publishes; the difference is a change of measure, not a price move.";
+  }
+  return null;
+}
+
+function DeltaCell({c,field,suffix,integer,nDays}){
+  const why=dailyDeltaRefusal(c,nDays,field==="priceDeltaPct");
+  if(why||c[field]==null){
+    return <span style={{color:"#9ca3af"}} title={why||"No value on one side of the comparison."}>—</span>;
   }
   const v=c[field];
   const up=v>0;
@@ -3796,26 +3920,51 @@ function DeltaCell({c,field,suffix,integer}){
   return <span style={{color,fontWeight:600}}>{formatted}{suffix}</span>;
 }
 
-function Sparkline({pts,w=80,h=22}){
-  if(!pts||pts.length<2)return <span style={{color:"#d1d5db",fontSize:10}}>—</span>;
-  const vals=pts.map(p=>p.minPricePerHour).filter(v=>typeof v==="number");
-  if(vals.length<2)return <span style={{color:"#d1d5db",fontSize:10}}>—</span>;
+/* Daily price on the latest measure only.
+   It used to plot minPricePerHour, which the source stopped publishing on
+   2026-07-28 — so under "Trend (60d)" it drew just the five floor days at the
+   start of the window (07-23 → 07-27) and presented them as the trend. It now
+   plots the resolved headline, but only the trailing run on the measure the
+   latest point carries: joining a ~$0.40 floor to a ~$3.39 median would draw
+   a leap that is a change of units, not a price move.
+   x is by calendar date, and the line breaks after any day the server lists
+   as the start of a significant capture gap, so an outage is not drawn as a
+   straight-line price path. */
+function Sparkline({pts,gapAfter,w=80,h=22}){
+  const dash=<span style={{color:"#d1d5db",fontSize:10}}>—</span>;
+  if(!pts||pts.length<2)return dash;
+  const basis=pts[pts.length-1].dailyBasis;
+  if(!basis)return dash;
+  // Unpriced days carry no basis and do not end the run; a day on the other
+  // measure does.
+  let start=pts.length-1;
+  while(start>0&&(pts[start-1].dailyBasis===basis||pts[start-1].dailyBasis==null))start--;
+  const run=pts.slice(start).filter(p=>p.dailyBasis===basis&&typeof p.dailyPrice==="number"&&isFinite(p.dailyPrice));
+  if(run.length<2)return dash;
+  const ts=run.map(p=>Date.parse(p.date+"T00:00:00Z"));
+  const vals=run.map(p=>p.dailyPrice);
+  const t0=ts[0];
+  const tSpan=(ts[ts.length-1]-t0)||1;
   const min=Math.min.apply(null,vals);
   const max=Math.max.apply(null,vals);
   const range=max-min||1;
   const pad=2;
-  const step=vals.length>1?(w-pad*2)/(vals.length-1):0;
-  const points=vals.map((v,i)=>{
-    const x=pad+i*step;
-    const y=pad+(h-pad*2)*(1-(v-min)/range);
-    return x.toFixed(1)+","+y.toFixed(1);
-  }).join(" ");
+  const segs=[[]];
+  run.forEach((p,i)=>{
+    const x=pad+(w-pad*2)*((ts[i]-t0)/tSpan);
+    const y=pad+(h-pad*2)*(1-(vals[i]-min)/range);
+    segs[segs.length-1].push([x,y]);
+    if(gapAfter&&gapAfter.has(p.date)&&i<run.length-1)segs.push([]);
+  });
   const lastV=vals[vals.length-1];
   const firstV=vals[0];
   const trendColor=lastV>firstV?"#dc2626":lastV<firstV?"#059669":"#6b7280";
   return(
     <svg width={w} height={h} style={{display:"inline-block",verticalAlign:"middle"}}>
-      <polyline points={points} fill="none" stroke={trendColor} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+      <title>{FIN_BASIS_SHORT[basis]+" $/hr, "+run[0].date+" to "+run[run.length-1].date+" · "+run.length+" days"}</title>
+      {segs.map((s,i)=>s.length>1
+        ?<polyline key={i} points={s.map(([x,y])=>x.toFixed(1)+","+y.toFixed(1)).join(" ")} fill="none" stroke={trendColor} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+        :<circle key={i} cx={s[0][0].toFixed(1)} cy={s[0][1].toFixed(1)} r="1" fill={trendColor}/>)}
     </svg>
   );
 }
