@@ -92,13 +92,17 @@ source actually changes.
 | `pricing-share-signal` | daily KV capture | — | — | 10 min | ~10 min + its matrix |
 | the three embeds | third-party | — | — | 5 min | ~5 min |
 
-That row is edge-cached rather than uncached because it now reads a detail page
-per tracked SKU for board power on top of the listing — seven fetches where there
-was one. The cache is the precondition for the feature, not a bonus, and the
-5-minute lifetime keeps the path inside the budget it already had. Board power
-rides the same entry as the prices; it is a hardware specification and changes
-approximately never, but giving it its own longer lifetime would stack a second
-TTL on this one, which is the drift this section exists to prevent.
+That row is edge-cached rather than uncached because building it also reads
+board power from each model's own page on the source. The cache is the
+precondition for the feature, not a bonus, and the 5-minute lifetime keeps the
+prices inside the budget they already had. Board power is kept per model and
+copied into every build — a figure for a week, a page that publishes none for a
+day, a refused or timed-out read not at all — so a wattage can be a week old
+beside a 5-minute price, which is fine for a nameplate rating that changes
+approximately never. Those entries fill a few models per cache miss, and the
+cache is per Cloudflare location, so how many cards carry a figure depends on
+where the reader is and how busy that location is; there is no fixed time by
+which all of them do. Each row says whether its card has been read.
 
 When getdeploying refuses the listing — it answers 403 to everything while it is
 rate-limiting — that row serves the last listing that parsed (kept for a day)

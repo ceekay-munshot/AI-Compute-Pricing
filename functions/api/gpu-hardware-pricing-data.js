@@ -45,10 +45,11 @@ const DETAIL_BASE = 'https://getdeploying.com/gpus/';
 const EDGE_TTL = 300;
 
 // Board power is a hardware specification: it changes when a new SKU appears,
-// not when a price moves. It rides the same 300 s entry as the prices only
-// because it lives in the same payload — there is no separate, longer cache,
-// because a second lifetime stacked on this one is exactly the kind of drift
-// the Freshness section warns about.
+// not when a price moves. Each model's figure is kept in its own entry (see
+// POWER_TTL below) and copied into this 300 s payload on every build, so a
+// wattage can be up to a week old while the price beside it is minutes old.
+// That is acceptable for a nameplate rating and is why the Freshness table's
+// 5-minute figure speaks for the prices only.
 const DETAIL_HEAD_BYTES = 65536;  // the ld+json block sits well inside this
 const DETAIL_TIMEOUT_MS = 6000;
 // Three at a time. A Worker holds at most six simultaneous outbound
@@ -62,13 +63,25 @@ const DETAIL_CONCURRENCY = 3;
 // rather than just the watt column (observed first-hand while building this).
 // Cloudflare also caps a request's outbound subrequests.
 //
-// So the figures accumulate instead. Each miss tops up a few models, each
-// result is cached on its own for a week, and within a couple of hours every
-// model carries a wattage — with the strategic SKUs filled first so the rows
-// people actually look at are never the ones waiting. A card's rated power
-// does not change; only the set of cards does.
+// So the figures accumulate instead. Each miss tops up a few models and each
+// result is cached on its own for a week, with the strategic SKUs filled first
+// so the rows people actually look at are never the ones waiting. There is NO
+// fixed time by which every model carries a wattage: caches.default is per
+// Cloudflare location, so each location fills its own copy, and only on its
+// own misses — one with steady traffic fills within hours, a quiet one can take
+// days. That is why every row says which state it is in (boardPowerStatus)
+// instead of leaving a blank for the reader to guess at.
 const DETAIL_PER_REQUEST = 6;
 const POWER_TTL = 7 * 24 * 3600;
+
+// A page that WAS read and carries no usable figure is remembered too. Before
+// this it was never cached, so it was refetched on every miss, and six such
+// models at the top of the fill order would take every top-up slot forever and
+// starve every model below them. A day rather than a week, so a figure the
+// source adds later still turns up. Only a verdict about the page's CONTENT is
+// remembered — a refusal, a timeout or a page that is not recognisably a card
+// page says nothing about the card and is retried (see absenceIsCacheable).
+const NO_POWER_TTL = 24 * 3600;
 
 // getdeploying rate-limits, and when it does it answers 403 to EVERYTHING,
 // including the listing — observed repeatedly while this was being built. The
@@ -142,7 +155,7 @@ async function buildGpuPricing(context) {
     // it runs after the listing rather than alongside it.
     const parsed = parseRows(list.html);
     const power = await fetchBoardPower(context, parsed);
-    const rows = parsed.map(r => withBoardPower(r, power.bySku));
+    const rows = parsed.map(r => withBoardPower(r, power));
     const sourceUpdatedAt = parseUpdatedAt(list.html);
 
     // A board-power outage deliberately does NOT mark this no-store. Blank watt
@@ -157,10 +170,11 @@ async function buildGpuPricing(context) {
         sourceUpdatedAt,
         fetchedAt: new Date().toISOString(),
         count: rows.length,
-        // Operator-facing only; nothing here is rendered. `pending` counts
-        // models still waiting for a first fetch — it should fall to 0 within
-        // a couple of hours of a deploy and stay there.
-        boardPower: { known: power.known, total: power.total, pending: power.pending, errors: power.errors },
+        // Operator-facing only; nothing here is rendered. One count per
+        // boardPowerStatus, for the Cloudflare location that built this
+        // response — another location can be further along or further behind.
+        // `errors` lists only the reads attempted in this build.
+        boardPower: { ...countBoardPowerStatus(rows), total: rows.length, errors: power.errors },
         rows,
     };
 
@@ -261,7 +275,24 @@ function offerIsPerGpu(node) {
 }
 
 /**
- * { watts, variant } for `expectedSku` from a detail page's JSON-LD, or null.
+ * Board power for `expectedSku` from a detail page's JSON-LD, and why not.
+ *
+ * Returns { found, reason }. `found` is { watts, variant } or null; when it is
+ * null, `reason` says which of four things happened, because they do not mean
+ * the same thing:
+ *
+ *   other_card      the page is a card page (it has a Product) but for a
+ *                   different card name — see productNameMatches
+ *   not_per_gpu     this card's Product is there, but its price is not per GPU
+ *   no_board_power  this card's Product is there, per GPU, with no "<n> W"
+ *                   board power
+ *   not_card_page   no Product at all: no JSON-LD, unparseable JSON-LD, or only
+ *                   site-wide nodes. That is what a challenge page, an error
+ *                   page or a truncated read looks like, as much as any real
+ *                   page, so it is evidence of nothing about the card.
+ *
+ * The first three are the source's own content and read the same on the next
+ * fetch; the last is not. absenceIsCacheable is the one rule built on that.
  *
  * `variant` is getdeploying's own "Specification variant" string where it
  * publishes one (H100 "H100 SXM", A100 "A100 PCIe"; H200, B200, GB200 and L40S
@@ -271,16 +302,18 @@ function offerIsPerGpu(node) {
  * The block body is NOT entity-decoded: inside a <script> the content is raw
  * JSON, and decoding &amp; or &quot; there would corrupt it.
  */
-export function boardPowerFromLdJson(html, expectedSku) {
+export function readBoardPower(html, expectedSku) {
   LD_JSON_RE.lastIndex = 0;
+  let sawProduct = false;
   let m;
   while ((m = LD_JSON_RE.exec(html)) !== null) {
     let doc;
     try { doc = JSON.parse(m[1]); } catch { continue; }
     for (const node of ldNodes(doc)) {
       if (!node || node['@type'] !== 'Product') continue;
+      sawProduct = true;
       if (!productNameMatches(node.name, expectedSku)) continue;
-      if (!offerIsPerGpu(node)) return null;
+      if (!offerIsPerGpu(node)) return { found: null, reason: 'not_per_gpu' };
       const props = Array.isArray(node.additionalProperty) ? node.additionalProperty : [];
       const pick = (wanted) => {
         for (const p of props) {
@@ -291,12 +324,35 @@ export function boardPowerFromLdJson(html, expectedSku) {
         return null;
       };
       const watts = parseWatts(pick('board power'));
-      if (watts == null) return null;
+      if (watts == null) return { found: null, reason: 'no_board_power' };
       const v = pick('specification variant');
-      return { watts, variant: typeof v === 'string' && v.trim() ? v.trim() : null };
+      return { found: { watts, variant: typeof v === 'string' && v.trim() ? v.trim() : null }, reason: null };
     }
   }
-  return null;
+  return { found: null, reason: sawProduct ? 'other_card' : 'not_card_page' };
+}
+
+/** { watts, variant } for `expectedSku`, or null. readBoardPower without the reason. */
+export function boardPowerFromLdJson(html, expectedSku) {
+  return readBoardPower(html, expectedSku).found;
+}
+
+// The one rule for which failed reads may be remembered (for NO_POWER_TTL).
+// An allowlist, so anything not named here — http_403, http_429, any other
+// status, TimeoutError, AbortError, fetch_error, not_card_page, and whatever
+// new failure appears next — is retried rather than cached. Remembering a
+// refusal would tell readers for a day that the source publishes nothing, on
+// the strength of a rate limit.
+const CACHEABLE_ABSENCE = new Set(['other_card', 'not_per_gpu', 'no_board_power']);
+export function absenceIsCacheable(reason) {
+  return CACHEABLE_ABSENCE.has(reason);
+}
+
+// How this source says "too many requests". Once it has said it, every other
+// page this top-up asks for is refused too, and asking anyway deepens a limit
+// that takes the listing down with it.
+function isRefusal(error) {
+  return error === 'http_403' || error === 'http_429';
 }
 
 // Read only the head of the document: the ld+json block sits early and the
@@ -336,20 +392,31 @@ async function fetchOneBoardPower(sku) {
       headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml' },
       signal: AbortSignal.timeout(DETAIL_TIMEOUT_MS),
     });
-    if (!resp.ok) return { sku: sku.name, found: null, error: 'http_' + resp.status };
-    const found = boardPowerFromLdJson(await readHead(resp, DETAIL_HEAD_BYTES), sku.name);
-    return found == null
-      ? { sku: sku.name, found: null, error: 'no_board_power' }
-      : { sku: sku.name, found, error: null };
+    if (!resp.ok) return { sku: sku.name, slug: sku.slug, found: null, error: 'http_' + resp.status };
+    const { found, reason } = readBoardPower(await readHead(resp, DETAIL_HEAD_BYTES), sku.name);
+    return { sku: sku.name, slug: sku.slug, found, error: found ? null : reason };
   } catch (err) {
-    return { sku: sku.name, found: null, error: (err && err.name) || 'fetch_error' };
+    return { sku: sku.name, slug: sku.slug, found: null, error: (err && err.name) || 'fetch_error' };
   }
 }
 
 // Board power is cached per model, on our own origin, so one model's figure
 // survives independently of the listing response it happened to arrive with.
+//
+// Deliberately NOT versioned with CACHE_SCHEMA. A positive entry is still
+// exactly { watts, variant }, and a bump would throw away a week of reads at
+// every location and refetch them all from a source that answers bursts with
+// 403. The negative entry added alongside it, { unpublished: true }, is new and
+// has no watts, so code that predates it reads it as a miss and refetches —
+// harmless in either direction.
 function powerCacheKey(baseUrl, slug) {
   return new Request(new URL('/__board-power/' + encodeURIComponent(slug), baseUrl).toString(), { method: 'GET' });
+}
+
+function putPower(cache, baseUrl, slug, entry, ttl) {
+  return cache.put(powerCacheKey(baseUrl, slug), new Response(JSON.stringify(entry), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=' + ttl },
+  }));
 }
 
 function slugFromDetailUrl(url) {
@@ -361,14 +428,18 @@ function slugFromDetailUrl(url) {
 /**
  * Board power for as many models as are already known, plus a few fresh ones.
  *
- * Returns a map keyed by gpuModel. A model that has never been fetched is
- * simply absent, which renders as a blank cell — never as a guess, and never
- * as a reason to fail the listing.
+ * Returns { bySku, unpublished, failed, errors }: figures keyed by gpuModel,
+ * the models whose page was read and gives no usable figure, and the models
+ * whose read failed in THIS build. Every other model is simply not read yet.
+ * None of the three is ever a guess, and none is a reason to fail the listing.
+ * boardPowerStatus turns them into one answer per row.
  */
-async function fetchBoardPower(context, rows) {
+export async function fetchBoardPower(context, rows) {
   const cache = caches.default;
   const baseUrl = context.request.url;
   const bySku = new Map();
+  const unpublished = new Set();
+  const failed = new Set();
   const errors = [];
 
   // Fill order: the strategic SKUs first, then the models the most providers
@@ -391,8 +462,11 @@ async function fetchBoardPower(context, rows) {
     try { hit = await cache.match(powerCacheKey(baseUrl, slug)); } catch { hit = null; }
     if (hit) {
       try {
-        const found = await hit.json();
-        if (found && typeof found.watts === 'number') { bySku.set(row.gpuModel, found); continue; }
+        const entry = await hit.json();
+        if (entry && typeof entry.watts === 'number') { bySku.set(row.gpuModel, entry); continue; }
+        // Remembered as unpublished: skipped, so it no longer takes a top-up
+        // slot from the models below it.
+        if (entry && entry.unpublished === true) { unpublished.add(row.gpuModel); continue; }
       } catch { /* fall through to a refetch */ }
     }
     misses.push({ name: row.gpuModel, slug });
@@ -402,30 +476,65 @@ async function fetchBoardPower(context, rows) {
   for (let i = 0; i < topUp.length; i += DETAIL_CONCURRENCY) {
     const batch = topUp.slice(i, i + DETAIL_CONCURRENCY);
     const settled = await Promise.all(batch.map(sku => fetchOneBoardPower(sku)));
+    let refused = false;
     for (const r of settled) {
-      if (!r.found) { errors.push({ sku: r.sku, error: r.error }); continue; }
-      bySku.set(r.sku, r.found);
-      const slug = (topUp.find(t => t.name === r.sku) || {}).slug;
-      if (slug) {
-        const body = new Response(JSON.stringify(r.found), {
-          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=' + POWER_TTL },
-        });
-        context.waitUntil(cache.put(powerCacheKey(baseUrl, slug), body));
+      if (r.found) {
+        bySku.set(r.sku, r.found);
+        context.waitUntil(putPower(cache, baseUrl, r.slug, r.found, POWER_TTL));
+        continue;
+      }
+      errors.push({ sku: r.sku, error: r.error });
+      if (absenceIsCacheable(r.error)) {
+        unpublished.add(r.sku);
+        context.waitUntil(putPower(cache, baseUrl, r.slug, { unpublished: true }, NO_POWER_TTL));
+      } else {
+        // Not cached: the next miss tries it again, first in line.
+        failed.add(r.sku);
+        if (isRefusal(r.error)) refused = true;
       }
     }
+    // The source is rate-limiting. The models not yet tried stay pending for
+    // the next miss rather than being fired into a refusal.
+    if (refused) break;
   }
 
-  return {
-    bySku,
-    known: bySku.size,
-    total: candidates.length,
-    pending: Math.max(0, misses.length - topUp.length),
-    errors,
-  };
+  return { bySku, unpublished, failed, errors };
 }
 
-function withBoardPower(row, bySku) {
-  const found = bySku.get(row.gpuModel) || null;
+/**
+ * Why a row does or does not carry board power — one answer per row, decided
+ * here so that nothing downstream infers it from a blank. A blank used to be
+ * described to readers as "no rated board power published for this card" when
+ * most blanks were cards that simply had not been read yet.
+ *
+ *   known        a figure is attached
+ *   pending      not read yet by the Cloudflare location that built this
+ *                response (never read there, its entry expired, or this
+ *                build stopped early on a refusal); nothing is known either way
+ *   unpublished  the card's page was read and gives no board power usable with
+ *                a per-GPU price (see absenceIsCacheable)
+ *   failed       read in this build and the source refused, timed out, or
+ *                returned something that is not a card page; retried next miss
+ *   no_page      the listing links no page for this card, so there is nothing
+ *                to read
+ */
+export function boardPowerStatus(row, power) {
+  const name = row && row.gpuModel;
+  if (power.bySku.has(name)) return 'known';
+  if (!slugFromDetailUrl(row && row.detailUrl)) return 'no_page';
+  if (power.unpublished.has(name)) return 'unpublished';
+  if (power.failed.has(name)) return 'failed';
+  return 'pending';
+}
+
+function countBoardPowerStatus(rows) {
+  const counts = { known: 0, pending: 0, unpublished: 0, failed: 0, no_page: 0 };
+  for (const r of rows) counts[r.boardPowerStatus] += 1;
+  return counts;
+}
+
+function withBoardPower(row, power) {
+  const found = power.bySku.get(row.gpuModel) || null;
   const watts = found ? found.watts : null;
   const price = row.dailyPrice;
   return {
@@ -438,6 +547,9 @@ function withBoardPower(row, bySku) {
     // — so this is what lets the UI attribute the figure rather than a comment
     // in this file asserting it once and rotting.
     boardPowerVariant: found ? found.variant : null,
+    // Why boardPowerWatts is or is not set — see boardPowerStatus. The table
+    // words each blank cell from this rather than assuming one reason for all.
+    boardPowerStatus: boardPowerStatus(row, power),
     // $/hr per kilowatt of RATED board power: the hourly rental price of a unit
     // of installed power capacity. NOT an electricity cost, and nothing
     // downstream may label it as one. Both sides denominate one GPU, checked

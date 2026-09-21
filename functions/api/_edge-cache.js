@@ -48,9 +48,12 @@
  * last-good fallback moved onto a schema-versioned key, and a stale serve
  * stopped being stored in the edge cache.
  *
+ * v7: GPU listing rows gained boardPowerStatus (known / pending /
+ * unpublished / failed) and the listing's boardPower block its counts.
+ *
  * Routine data changes do NOT need a bump — the TTLs bound those.
  */
-const CACHE_SCHEMA = 'v6';
+const CACHE_SCHEMA = 'v7';
 
 /**
  * Build the cache key.

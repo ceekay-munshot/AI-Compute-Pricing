@@ -1621,6 +1621,21 @@ const GPU_STRATEGIC_ORDER=[
 // KPI cards want just the cheapest by SKU — uses same canonical names.
 const GPU_KPI_SKUS=["Nvidia H100","Nvidia H200","Nvidia B200","Nvidia A100"];
 
+// What a blank $/kW-hr cell says on hover, keyed by the status the endpoint
+// reports per row. The endpoint decides WHICH state a row is in — it is the only
+// place that knows whether a card's page was read — and this only words it.
+// Every blank used to say "no rated board power published for this card", which
+// was false for most of them: they had not been read yet.
+const KW_BLANK_REASON={
+  pending:"Waiting to be read. The source refuses bulk fetching, so rated power is read a few cards at a time and this card's turn has not come yet. Nothing is estimated in the meantime.",
+  unpublished:"getdeploying's page for this card gives no rated board power that can be paired with this price, so the cell is left blank rather than estimated. The page is checked again periodically.",
+  failed:"The last attempt to read this card's rated power failed: the source refused, did not answer in time, or returned a page that could not be read. It is retried automatically; nothing is estimated in the meantime.",
+  no_page:"The source's listing links no page for this card, so its rated power cannot be read.",
+};
+// A response built before statuses existed carries none. Say only what is true
+// of every such blank rather than guessing which state it was in.
+const KW_BLANK_UNKNOWN="Rated power is not available for this card in this response.";
+
 function fmtUSD(v){
   if(v==null||!isFinite(v))return"—";
   if(v<1)return"$"+v.toFixed(2);
@@ -1840,6 +1855,11 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,listingOld,listingAt,
     return (b.providerCount||0)-(a.providerCount||0);
   });
   const unpricedCount=rows.length-pricedRows.length;
+  // Counted over the rows actually shown, so the footnote describes this table
+  // as it stands rather than promising when it will fill.
+  const kwBlank=tableRows.filter(r=>r.pricePerKilowattHour==null).length;
+  const kwPending=tableRows.filter(r=>r.boardPowerStatus==="pending").length;
+  const kwUnpublished=tableRows.filter(r=>r.boardPowerStatus==="unpublished").length;
 
   // The source has published this listing as a vendor min-max range and as a single
   // median, and those are different statistics. The column is NAMED from what the
@@ -1949,7 +1969,7 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,listingOld,listingAt,
                         </td>
                         <td style={{...gpuTd,textAlign:"right",color:"#374151"}}
                             title={r.boardPowerWatts==null
-                              ?"No rated board power published for this card, so this cannot be computed."
+                              ?(KW_BLANK_REASON[r.boardPowerStatus]||KW_BLANK_UNKNOWN)
                               :r.boardPowerWatts+" W rated"+(r.boardPowerVariant?" · "+r.boardPowerVariant:"")+
                                (r.dailyPrice!=null?" · "+fmtUSD(r.dailyPrice)+"/hr":"")}>
                           {r.pricePerKilowattHour!=null?"$"+r.pricePerKilowattHour.toFixed(2):"—"}
@@ -1968,9 +1988,16 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,listingOld,listingAt,
               <div style={{padding:"8px 14px",borderTop:"0.5px solid #f3f4f6",fontSize:10,color:"#9ca3af",lineHeight:1.5}}>
                 {unpricedCount>0&&<>A further <b style={{color:"#6b7280",fontWeight:600}}>{unpricedCount}</b> {unpricedCount===1?"model is":"models are"} listed
                 by the source with no price, and {unpricedCount===1?"is":"are"} not shown. </>}
-                A blank in the $/kW&#8209;hr column means that card's rated power has not been read yet — the figures fill in
-                over the first couple of hours after a deploy, a few models at a time, because the source refuses bulk fetching.
-                {" "}
+                {kwBlank>0&&<>Hover a blank $/kW&#8209;hr cell for its reason. </>}
+                {kwPending>0&&<><b style={{color:"#6b7280",fontWeight:600}}>{kwPending}</b> of these {tableRows.length} cards
+                {kwPending===1?" is still waiting for its":" are still waiting for their"} rated power to be read. The source refuses bulk fetching, so it
+                is read a few cards at a time as this table is refreshed from the source, and each location that serves this page
+                keeps its own progress — how complete the column is depends on where you are reading from, and there is no set
+                time by which it fills. </>}
+                {kwUnpublished>0&&<><b style={{color:"#6b7280",fontWeight:600}}>{kwUnpublished}</b>
+                {kwUnpublished===1
+                  ?" card has no usable rated power on the source's page, so its cell stays blank. "
+                  :" cards have no usable rated power on the source's pages, so their cells stay blank. "}</>}
                 <b style={{color:"#6b7280",fontWeight:600}}>$/kW&#8209;hr</b> is the hourly price divided by the card's rated
                 board power — what a unit of installed power capacity costs to rent. It is <b style={{color:"#6b7280",fontWeight:600}}>not
                 an electricity cost</b>. Read each row on its own: board power is a nameplate figure published per card by

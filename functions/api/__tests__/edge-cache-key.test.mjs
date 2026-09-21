@@ -10,7 +10,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { edgeCacheKey } from '../_edge-cache.js';
+import { edgeCacheKey, schemaCacheKey } from '../_edge-cache.js';
 
 const BASE = 'https://ai-compute-pricing.pages.dev/api/provider-pricing-matrix';
 const key = (qs, params) => edgeCacheKey(new Request(`${BASE}?${qs}`), params).url;
@@ -65,4 +65,17 @@ test('the key is a bare GET, so no method or header of the caller folds in', () 
   const k = edgeCacheKey(req, { metric: 'input' });
   assert.equal(k.method, 'GET');
   assert.equal(k.headers.get('X-Anything'), null);
+});
+
+test('a handler-private copy of a payload is versioned with the main entry', () => {
+  // The GPU listing's last-good fallback is a copy of the cached payload. Keyed
+  // on its path alone, it was out of reach of every CACHE_SCHEMA bump and could
+  // hand back the previous shape whenever the source refused.
+  const main = new URL(edgeCacheKey(new Request(BASE), {}).url).searchParams.get('__schema');
+  const priv = new URL(schemaCacheKey(BASE + '?b=zzzz&attacker=1', '/__gpu-listing-last-good').url);
+  assert.ok(main, 'edgeCacheKey must carry a schema');
+  assert.equal(priv.searchParams.get('__schema'), main);
+  assert.equal(priv.pathname, '/__gpu-listing-last-good');
+  // Nothing from the caller's URL reaches the key.
+  assert.deepEqual([...priv.searchParams.keys()], ['__schema']);
 });
