@@ -29,7 +29,12 @@ test('provider matrix refuses QoQ across the change and keeps a genuine lone cut
   for (const slug of ['google', 'openai']) { assert.equal(q3[slug].qoq, null); assert.equal(q3[slug].qoqMeasureChanged, true); assert.match(q3[slug].qoqReason, /Not comparable/); }
   assert.ok(q3.anthropic.qoq < 0, 'the real cut is still reported');
   assert.equal(q3.anthropic.qoqMeasureChanged, undefined);
-  assert.equal(q3.deepseek.qoq, -0.09, 'an ordinary repricing the same day is reported as one');
+  // Like-for-like over the seven models priced in both quarters, each cut to
+  // 0.9x on 2026-07-10: nine days at the old price and 73 at the new one in
+  // Q3 give 0.911x, -8.9%. The -0.09 this used to read came from dividing the
+  // two levels AFTER rounding them to $0.001 per 1M.
+  assert.equal(q3.deepseek.qoq, -0.089, 'an ordinary repricing the same day is reported as one');
+  for (const slug of ['google', 'openai']) assert.equal(q3[slug].qoqMatchedModels, undefined, 'a refused change matches no models');
 });
 test('peer matrix refuses Jun->Jul MoM on touched reps and keeps the lone cut', async () => {
   const d = await call(peerMatrix, '/api/model-pricing-peer-matrix');

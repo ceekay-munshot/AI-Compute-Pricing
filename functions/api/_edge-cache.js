@@ -51,9 +51,14 @@
  * v7: GPU listing rows gained boardPowerStatus (known / pending /
  * unpublished / failed) and the listing's boardPower block its counts.
  *
+ * v8: provider-pricing-matrix QoQ/YoY became like-for-like — measured on the
+ * models priced in both quarters — and are refused where too few were. A
+ * stored matrix still carrying lineup-mix moves (Anthropic 2026-Q3 "-10.4%",
+ * named the biggest price cut with no model repriced) must not be replayed.
+ *
  * Routine data changes do NOT need a bump — the TTLs bound those.
  */
-const CACHE_SCHEMA = 'v7';
+const CACHE_SCHEMA = 'v8';
 
 /**
  * Build the cache key.

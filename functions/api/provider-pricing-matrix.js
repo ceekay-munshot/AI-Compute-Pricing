@@ -25,6 +25,16 @@
  *     floor is 2025-Q3 (partial). Client asked for 2023+; we do not fake it.
  *   - YoY is only returned when a same-quarter one year earlier row exists
  *     with real data.
+ *   - A price CHANGE is like-for-like. QoQ and YoY compare the models a
+ *     provider priced in BOTH quarters, each at its own average price in each,
+ *     so a model listed or retired between them cannot read as a price move.
+ *     The level stays the whole lineup's average — a true statement of what
+ *     the lineup costs. Anthropic's 2026-Q3 read "-10.4%" and was named the
+ *     biggest price cut with not one of its models repriced: four models left
+ *     the lineup, four joined, and the fourteen priced in both quarters did not
+ *     move. Where too few models were priced in both to stand for the
+ *     provider, the change is refused with a reason (matchedModelGrowth).
+ *     Model-day view only; the usage-weighted view compares its own levels.
  *   - The source can change WHAT it reports: on 2026-07-10 its figure for 13
  *     Google and 10 OpenAI models fell to exactly half on one day. Every price
  *     is read, and every quarter's measure decided, by _model-price-basis.js:
@@ -235,7 +245,10 @@ async function fetchAllProviders(providers, batchSize = 4) {
  * Every provider-quarter's model-day level, on ONE measure.
  *
  * Returns slug -> quarter -> resolveTally() result ({ mean, n, basis, models,
- * excludedN, ... }, mean in $/token). Computed once per request and read by
+ * excludedN, ... }, mean in $/token), plus `modelLevels`: model -> that
+ * model's own mean price in the quarter on the quarter's measure, which the
+ * like-for-like growth in buildMatrix compares (modelLevelsOn). Its keys are
+ * exactly `models`. Computed once per request and read by
  * both weightings — the model-day average in buildMatrix and the usage-weighted
  * resolver — so the two always stand on the same measure in the same quarter.
  *
@@ -247,6 +260,7 @@ function providerQuarterLevels(providerResults, metric, book) {
   const out = new Map();
   for (const pr of providerResults) {
     const tallies = new Map();                     // quarter -> tally
+    const byModel = new Map();                     // quarter -> model -> basis -> [sum, n]
     for (const row of pr.rows) {
       // Alternate-billing SKUs are the same model sold on different terms —
       // ':batch' is ~50% off async, plus ':beta', ':thinking', ':free',
@@ -269,13 +283,156 @@ function providerQuarterLevels(providerResults, metric, book) {
       if (v === null) continue;
       const day = rowDay(row);
       if (!day) continue;
-      addToTally(tallyFor(tallies, quarterOf(day)), book.basisOf(pr.slug, row.model, day), v, row.model || null);
+      const q = quarterOf(day);
+      const basis = book.basisOf(pr.slug, row.model, day);
+      addToTally(tallyFor(tallies, q), basis, v, row.model || null);
+      // The same observation, kept per model and per measure, so each model's
+      // own level can be read on whichever measure the quarter resolves to.
+      if (row.model) {
+        let models = byModel.get(q);
+        if (!models) byModel.set(q, (models = new Map()));
+        let slots = models.get(row.model);
+        if (!slots) models.set(row.model, (slots = new Map()));
+        const s = slots.get(basis) || [0, 0];
+        s[0] += v;
+        s[1] += 1;
+        slots.set(basis, s);
+      }
     }
     const levels = new Map();
-    for (const [q, t] of tallies) levels.set(q, resolveTally(t));
+    for (const [q, t] of tallies) {
+      const stat = resolveTally(t);
+      stat.modelLevels = modelLevelsOn(byModel.get(q), stat.basis);
+      levels.set(q, stat);
+    }
     out.set(pr.slug, levels);
   }
   return out;
+}
+
+/**
+ * Each model's own mean price in one provider-quarter ($/token), on the
+ * quarter's measure: exactly the observations the quarter's level counts for
+ * that model — countsToward(), the rule _model-price-basis.js states for one
+ * day against a period — and no others.
+ *
+ * A model whose every observation in the quarter sits on the other side of a
+ * change of measure gets no entry, just as it has no place in the level, so it
+ * cannot re-enter a comparison through the like-for-like growth below.
+ */
+function modelLevelsOn(models, basis) {
+  const out = new Map();
+  for (const [model, slots] of models || []) {
+    let sum = 0;
+    let n = 0;
+    for (const [b, [s, k]] of slots) {
+      if (!countsToward(b, basis)) continue;
+      sum += s;
+      n += k;
+    }
+    if (n) out.set(model, sum / n);
+  }
+  return out;
+}
+
+// A like-for-like price change needs at least this many models priced in both
+// quarters. One model's change is that model's, not its provider's — the line
+// the usage weighting (MIN_WEIGHTED_MODELS) and the estimate pass in
+// buildMatrix draw for the same reason.
+const MIN_MATCHED_MODELS = 2;
+// ...and they must be at least this share of the models priced in the later
+// quarter, the lineup whose average the cell shows. Below half, the change
+// describes what is left of an older lineup, not the one on the page.
+// Measured on 2026-09-21: Anthropic 2026-Q3 against 2025-Q3 matches 5 of 18
+// (13 models listed since, 7 retired) and is refused; against 2026-Q2 it
+// matches 14 of 18, and DeepSeek's YoY 8 of 15, and both are computed.
+const MIN_MATCHED_SHARE = 0.5;
+
+/**
+ * A provider's price change between two quarters, LIKE-FOR-LIKE: measured on
+ * the models priced in both, never on the two lineup averages — which move
+ * whenever a model is listed or retired, with no price changing at all.
+ *
+ * `cur` and `prior` are providerQuarterLevels() entries on the SAME measure;
+ * the caller refuses a change of measure before asking. Each matched model
+ * enters at its own mean price in each quarter, and the change is the ratio of
+ * the matched models' average prices:
+ *
+ *     growth = mean(matched, cur) / mean(matched, prior) - 1
+ *
+ * Why the ratio of averages, and not the mean of each model's own % change:
+ *   - It is the change of the SAME statistic the cell shows as its level (an
+ *     equal-weighted mean of $/token), held to one fixed lineup. With no model
+ *     entering or leaving, and each priced every day, it is the figure the
+ *     matrix has always printed, so what this removes is the lineup-mix
+ *     artefact and nothing else.
+ *   - It weighs each model's move by its price, as the level does. A mean of
+ *     % changes (or their geometric mean) gives a $0.03 model the same say as
+ *     a $15 one: DeepSeek's r1-distill-llama-70b went from $0.033 to $0.800 per
+ *     1M input tokens between 2025-Q3 and 2026-Q3, which alone carries a mean
+ *     of % changes to +318% against +73% for the matched models' average.
+ *
+ * Returns { growth, matched, models, onlyNow, onlyThen }. growth is null when
+ * fewer than MIN_MATCHED_MODELS, or fewer than MIN_MATCHED_SHARE of `models`,
+ * were priced in both.
+ */
+function matchedModelGrowth(cur, prior) {
+  let sumNow = 0;
+  let sumThen = 0;
+  let matched = 0;
+  for (const [model, now] of cur.modelLevels) {
+    const then = prior.modelLevels.get(model);
+    if (then === undefined) continue;
+    sumNow += now;
+    sumThen += then;
+    matched += 1;
+  }
+  const models = cur.modelLevels.size;
+  const out = { growth: null, matched, models, onlyNow: models - matched, onlyThen: prior.modelLevels.size - matched };
+  if (matched < MIN_MATCHED_MODELS || matched < MIN_MATCHED_SHARE * models) return out;
+  const g = basisGrowth(
+    { value: sumNow / matched, basis: cur.basis },
+    { value: sumThen / matched, basis: prior.basis },
+  );
+  // + 0 turns a rounded -0 (float noise on an unchanged lineup) into 0, so a
+  // lineup whose prices did not move can never print as a cut.
+  out.growth = g === null ? null : g + 0;
+  return out;
+}
+
+function modelsPhrase(n) {
+  return n + (n === 1 ? ' model' : ' models');
+}
+
+/** What a like-for-like change rests on, in words, for its tooltip. */
+function likeForLikeNote(m, nowLabel, thenLabel) {
+  const outside = [];
+  if (m.onlyNow) outside.push(modelsPhrase(m.onlyNow) + ' priced only in ' + nowLabel);
+  if (m.onlyThen) outside.push(modelsPhrase(m.onlyThen) + ' priced only in ' + thenLabel);
+  return 'Like-for-like: the ' + modelsPhrase(m.matched) + ' priced in both ' + thenLabel +
+    ' and ' + nowLabel + ', each at its own average price in each quarter.' +
+    (outside.length
+      ? ' ' + outside.join(' and ') + (m.onlyNow + m.onlyThen === 1 ? ' is' : ' are') +
+        ' left out of the change; each quarter\'s average price still includes them.'
+      : ' No model was added or dropped between them.');
+}
+
+/** Why a like-for-like change is blank, in words, for its tooltip. */
+function tooFewMatchedReason(m, nowLabel, thenLabel) {
+  const lead = 'A price change is measured on the models priced in both quarters';
+  if (m.matched === 0) {
+    return 'Not computed: no model priced in ' + nowLabel + ' was also priced in ' + thenLabel +
+      '. ' + lead + ', so there is nothing to compare.';
+  }
+  const who = m.matched === m.models
+    ? (m.models === 1 ? 'the one model' : 'all ' + m.models + ' models')
+    : 'only ' + m.matched + ' of the ' + m.models + ' models';
+  return 'Not computed: ' + who + ' priced in ' + nowLabel + (m.matched === 1 ? ' was' : ' were') +
+    ' also priced in ' + thenLabel + '. ' + lead +
+    (m.matched < MIN_MATCHED_MODELS
+      ? ', and one model\'s change is not the provider\'s.'
+      : ', and fewer than half of this lineup were, so it would not stand for the provider.' +
+        ' Comparing the two quarters\' averages instead would measure models being listed and retired, not prices moving.');
 }
 
 /**
@@ -439,6 +596,14 @@ function buildMatrix(levelsBySlug, weighting, events) {
   // Attach QoQ / YoY per cell (against same provider, adjacent periods).
   // Null-safe: if the comparison quarter is absent or has null avg, leave null.
   //
+  // In the model-day view the change is LIKE-FOR-LIKE (matchedModelGrowth):
+  // measured on the models priced in both quarters, never on the two lineup
+  // averages, so a model listed or retired between them is not a price move.
+  // The level stays the whole lineup's average. Where too few models were
+  // priced in both, the change is refused with a reason instead. The
+  // usage-weighted view still compares its own weighted levels: what the
+  // market paid does move when it buys a different mix.
+  //
   // Whether two quarters can be compared at all is decided in ONE place,
   // _model-price-basis.js: quarters on different measures are refused, and
   // the cell carries the reason instead of the difference. At provider level
@@ -451,22 +616,35 @@ function buildMatrix(levelsBySlug, weighting, events) {
   const level = (c) => (c && c.avg !== null ? { value: c.avg, basis: c.basis } : null);
   for (const row of rows) {
     row.cells.forEach((cell, idx) => {
-      const pq = priorQuarter(row.quarter);
-      const yq = yearAgoQuarter(row.quarter);
+      const stats = levelsBySlug.get(cell.slug);
       const cur = level(cell);
-      const prior = level(rowByQuarter.get(pq)?.cells?.[idx]);
-      const year  = level(rowByQuarter.get(yq)?.cells?.[idx]);
-      cell.qoq = basisGrowth(cur, prior);
-      cell.qoqLabel = formatPct(cell.qoq);
-      cell.yoy = basisGrowth(cur, year);
-      cell.yoyLabel = formatPct(cell.yoy);
-      if (isMeasureChange(cur, prior)) {
-        cell.qoqMeasureChanged = true;
-        cell.qoqReason = measureChangeReason(cur, prior, periodLabel(pq), events);
-      }
-      if (isMeasureChange(cur, year)) {
-        cell.yoyMeasureChanged = true;
-        cell.yoyReason = measureChangeReason(cur, year, periodLabel(yq), events);
+      // For each of qoq (the prior quarter) and yoy (the same quarter a year
+      // earlier) this writes <key> and <key>Label, and where they apply
+      // <key>MeasureChanged + <key>Reason (a change of measure),
+      // <key>MatchedModels (models priced in both quarters),
+      // <key>TooFewMatched + <key>Reason (refused: too few of them), or
+      // <key>Note (what a like-for-like figure rests on).
+      for (const [key, then] of [['qoq', priorQuarter(row.quarter)], ['yoy', yearAgoQuarter(row.quarter)]]) {
+        const prior = level(rowByQuarter.get(then)?.cells?.[idx]);
+        let growth = basisGrowth(cur, prior);
+        if (isMeasureChange(cur, prior)) {
+          // Refused before any model is matched: a model the change moved
+          // cannot come back in through the like-for-like path.
+          cell[key + 'MeasureChanged'] = true;
+          cell[key + 'Reason'] = measureChangeReason(cur, prior, periodLabel(then), events);
+        } else if (growth !== null && !weighting) {
+          const m = matchedModelGrowth(stats.get(row.quarter), stats.get(then));
+          growth = m.growth;
+          cell[key + 'MatchedModels'] = m.matched;
+          if (growth === null) {
+            cell[key + 'TooFewMatched'] = true;
+            cell[key + 'Reason'] = tooFewMatchedReason(m, periodLabel(row.quarter), periodLabel(then));
+          } else {
+            cell[key + 'Note'] = likeForLikeNote(m, periodLabel(row.quarter), periodLabel(then));
+          }
+        }
+        cell[key] = growth;
+        cell[key + 'Label'] = formatPct(growth);
       }
     });
   }
@@ -817,9 +995,13 @@ async function buildProviderMatrix(request, metric, weight) {
       : 'Upstream is pricepertoken.com\'s own historical pricing API. ' +
         'Per-provider daily model prices are averaged equal-weighted across ' +
         'every (model, day) observation in each calendar quarter. No synthetic ' +
-        'backfill — pre-upstream quarters simply do not appear. Where the source ' +
-        'changed what it reports, each quarter averages one measure only and ' +
-        'QoQ/YoY across the change are not computed.',
+        'backfill — pre-upstream quarters simply do not appear. QoQ/YoY are ' +
+        'like-for-like: they compare only the models priced in both quarters, ' +
+        'each at its own average price, so a model being listed or retired is ' +
+        'not read as a price move; they are not computed where fewer than two ' +
+        'models, or fewer than half of the quarter\'s models, were priced in ' +
+        'both. Where the source changed what it reports, each quarter averages ' +
+        'one measure only and QoQ/YoY across the change are not computed.',
     earliestDateObserved: earliestDate ? earliestDate.slice(0, 10) : null,
     // Every day on which the source changed what it reports, found from this
     // response's own rows, and the plain-words caption the matrix shows for

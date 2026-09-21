@@ -949,8 +949,17 @@ function ModelPricingHistoryBlock(){
                         ?(c.yoyMeasureChanged?(c.yoyReason||"The source changed what it reports between these quarters."):null)
                         :null;
                     const afterChange=!!c.basis&&c.basis!=="origin";
-                    if(view==="qoq"){ main=refusedWhy?measureChangedTag():(c.qoqLabel||"—"); color=cellColor(c.qoq); sub=c.avgLabel; }
-                    else if(view==="yoy"){ main=refusedWhy?measureChangedTag():(c.yoyLabel||"—"); color=cellColor(c.yoy); sub=c.avgLabel; }
+                    // Model-day growth is like-for-like: measured on the models priced in
+                    // both quarters, so the lineup average would not reconcile with it and
+                    // the sub-label says what it rests on instead. Where too few were priced
+                    // in both, the change is blank and the hover says why.
+                    const matched=view==="qoq"?c.qoqMatchedModels:view==="yoy"?c.yoyMatchedModels:null;
+                    const growthWhy=view==="qoq"?(c.qoqReason||c.qoqNote):view==="yoy"?(c.yoyReason||c.yoyNote):null;
+                    const growthSub=(g)=>matched==null?c.avgLabel
+                      :g!=null?matched+(matched===1?" model":" models")+" like-for-like"
+                      :matched+" of "+(c.modelCount||0)+" in both qtrs";
+                    if(view==="qoq"){ main=refusedWhy?measureChangedTag():(c.qoqLabel||"—"); color=cellColor(c.qoq); sub=growthSub(c.qoq); }
+                    else if(view==="yoy"){ main=refusedWhy?measureChangedTag():(c.yoyLabel||"—"); color=cellColor(c.yoy); sub=growthSub(c.yoy); }
                     else {
                       main=c.avgLabel;
                       sub=weighted
@@ -1000,7 +1009,7 @@ function ModelPricingHistoryBlock(){
                       :(c.avgLabel||"—")+" avg · "+(c.modelCount||0)+" models in this quarter · "+(c.obsCount||0)+" daily observations"+(c.qoqLabel?" · QoQ "+c.qoqLabel:"")+(c.yoyLabel?" · YoY "+c.yoyLabel:"");
                     return(
                       <td key={c.slug} style={{padding:"10px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",textAlign:"right",fontWeight:600,color,whiteSpace:"nowrap"}}
-                          title={refusedWhy||[tip,afterChangeTitle(afterChange?c.basis:null,c.basisExcludedObs)].filter(Boolean).join(" · ")}>
+                          title={refusedWhy||[growthWhy,tip,afterChangeTitle(afterChange?c.basis:null,c.basisExcludedObs)].filter(Boolean).join(" · ")}>
                         <div>{main}{view==="avg"&&afterChange&&main!=="—"&&afterChangeMark()}</div>
                         <div style={{fontSize:9,color:withheld&&!showEst?"#d1d5db":"#9ca3af",fontWeight:400,marginTop:1}}>{sub}</div>
                       </td>
