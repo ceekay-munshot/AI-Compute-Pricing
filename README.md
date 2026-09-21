@@ -100,6 +100,16 @@ rides the same entry as the prices; it is a hardware specification and changes
 approximately never, but giving it its own longer lifetime would stack a second
 TTL on this one, which is the drift this section exists to prevent.
 
+When getdeploying refuses the listing — it answers 403 to everything while it is
+rate-limiting — that row serves the last listing that parsed (kept for a day)
+instead of an empty tab, marked as such, and the GPU tab shows its capture time
+and drops the word *Live*. That fallback is **never edge-cached**: stored, it
+would keep being served for the full 5 minutes after the source recovered. It is
+sent `private, max-age=60`, which the edge cache refuses and a browser honours.
+The stored fallback copy is keyed with `CACHE_SCHEMA`, so a schema bump abandons
+it along with the response entries. Pinned by
+`functions/api/__tests__/gpu-stale-fallback.test.mjs`.
+
 If you change a TTL, change it with this table. The trap is that a longer cache
 looks free — the page gets faster and nothing appears to break, because stale
 prices render exactly like fresh ones.
@@ -109,9 +119,14 @@ while visible, and on return to a tab that sat hidden longer than that. The
 refresh happens **without remounting**, so a reader keeps their tab, subtab,
 toggles and scroll position; a failed background refresh leaves what is on
 screen alone rather than replacing it with an error, and a later one that
-succeeds clears an error the first load raised. The reverse-proxied embeds
-reload only on the return-to-a-hidden-tab path, never under someone reading
-them. See AUTO-REFRESH in `js/dashboard.jsx`.
+succeeds clears an error the first load raised. Left alone is not left silent:
+once a refresh fails with a block's figures more than 15 minutes old, the block
+shows an amber *Not updated since …* line with the time, which clears on the
+next refresh that lands. The header's *Last loaded* time is the last time this
+page actually received figures, not when a refresh was started — and not how
+old the figures themselves are, which the table above bounds. The
+reverse-proxied embeds reload only on the return-to-a-hidden-tab path, never
+under someone reading them. See AUTO-REFRESH in `js/dashboard.jsx`.
 
 Two things this cannot fix, because the data is written elsewhere:
 
@@ -140,8 +155,15 @@ repo has deliberately moved first, and they are all presentation:
   *Falling*, and its period unit follows the month/quarter axis instead of
   always saying `2Q`. google-dash labelled a rising period "Falling" whenever
   the period before it dipped.
-- **The header's fetched-at label** is generated at load instead of read from a
-  build-time literal that had gone five months stale.
+- **The header's timestamp** is the last time figures actually arrived, instead
+  of a build-time literal that had gone five months stale. (For a while it was
+  the time a refresh started, which vouched for freshness even when every fetch
+  after it failed.)
+- **Figures that are not current say so.** A block whose refreshes keep failing
+  shows an amber *Not updated since …* line, and GPU → Infra Monitoring stops
+  saying *Live* and shows the listing's capture time whenever the prices on
+  screen come from an earlier capture. google-dash fetches once and never
+  refreshes, so it has no failed refresh to report.
 - **Internal surfaces were removed from the UI.** The Representative Model Check
   strip (Firecrawl status, mappings-monitored counters, scrape timestamp) and
   both `Show diagnostics` disclosures are gone, taking the feed-integrity panel

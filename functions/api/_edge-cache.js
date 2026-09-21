@@ -43,9 +43,14 @@
  * to be refused — a stored matrix still carrying the phantom "Google -19.5%"
  * cut must not be replayed for the rest of its TTL.
  *
+ * It also versions the payload copies handlers keep for themselves through
+ * schemaCacheKey() below, so one bump abandons both. v6: the GPU listing's
+ * last-good fallback moved onto a schema-versioned key, and a stale serve
+ * stopped being stored in the edge cache.
+ *
  * Routine data changes do NOT need a bump — the TTLs bound those.
  */
-const CACHE_SCHEMA = 'v5';
+const CACHE_SCHEMA = 'v6';
 
 /**
  * Build the cache key.
@@ -77,6 +82,25 @@ export function edgeCacheKey(request, params) {
   canonical.searchParams.set('__schema', CACHE_SCHEMA);
   // A bare GET, so no incoming header or method folds into the match.
   return new Request(canonical.toString(), { method: 'GET' });
+}
+
+/**
+ * Key for a copy a handler keeps for itself in caches.default and may serve
+ * later — the GPU listing's last-good fallback is the case this exists for.
+ *
+ * Versioned with CACHE_SCHEMA for the same reason response keys are. The
+ * fallback holds a whole payload; unversioned, a bump abandoned every response
+ * entry and left the fallback free to hand back the PRE-bump shape, under the
+ * new code's labels, for up to a day the next time the source refused.
+ *
+ * Only for copies of a payload. Per-item facts whose shape never changes (board
+ * power per GPU) must NOT use this: a bump would throw them all away and refill
+ * them one detail-page fetch at a time from a source that rate-limits.
+ */
+export function schemaCacheKey(baseUrl, pathname) {
+  const url = new URL(pathname, baseUrl);
+  url.searchParams.set('__schema', CACHE_SCHEMA);
+  return new Request(url.toString(), { method: 'GET' });
 }
 
 /**

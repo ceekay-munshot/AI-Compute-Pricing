@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, Fragment, createContext, useContext } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo, Fragment, createContext, useContext } from "react";
 import { BarChart, Bar, LineChart, Line, ComposedChart, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, CartesianGrid, Legend } from "recharts";
 import { buildXlsx, downloadXlsx } from "./xlsx-export.js";
 import { buildGPUPricingWorkbook, gpuWorkbookFilename } from "./gpu-xlsx-report.js";
@@ -372,16 +372,17 @@ function PricingShareSignalBlock(){
   const[state,setState]=useState({phase:"loading",data:null,error:null});
   const {dataTick}=useContext(DataRefreshContext);
   const loaded=useRef(false); // true once real figures are on screen
+  const health=useUpdateHealth(); // see AUTO-REFRESH
   useEffect(()=>{
     let cancelled=false;
     const background=loaded.current; // see AUTO-REFRESH
     fetch("/api/pricing-share-signal",{cache:background?"no-cache":"default"})
       .then(r=>r.json())
       .then(d=>{ if(cancelled) return;
-        if(!d.success){ if(!background) setState({phase:"error",data:null,error:d.error||"Unknown error"}); }
-        else { loaded.current=true; setState({phase:"ready",data:d,error:null}); }
+        if(!d.success){ health.fail(); if(!background) setState({phase:"error",data:null,error:d.error||"Unknown error"}); }
+        else { loaded.current=true; setState({phase:"ready",data:d,error:null}); health.ok(); }
       })
-      .catch(e=>{ if(!cancelled&&!background) setState({phase:"error",data:null,error:e.message}); });
+      .catch(e=>{ if(cancelled) return; health.fail(); if(!background) setState({phase:"error",data:null,error:e.message}); });
     return ()=>{cancelled=true;};
   },[dataTick]);
 
@@ -406,6 +407,10 @@ function PricingShareSignalBlock(){
         <div style={{fontSize:16,fontWeight:700,color:"#111827",lineHeight:1.3}}>Pricing Behavior and Market Share Read-Through</div>
         <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>Where pricing moves are translating into share gains, resilience, or anomalies.</div>
       </div>
+      {/* In the header so the partial view carries it too. Never beside the
+          error card: behind needs figures that loaded, and once they have,
+          this block never goes back to an error. */}
+      {health.behind&&<NotUpdatedNote since={health.okAt}/>}
     </>
   );
 
@@ -675,12 +680,89 @@ const BUILD=typeof __BUILD__!=="undefined"?__BUILD__:"dev";
    browser to revalidate (cache:"no-cache"), otherwise a long max-age would
    hand back the very copy it is trying to replace.
 
+   Keeping the figures is not the same as keeping quiet about them. Each block
+   records when its figures last actually arrived (useUpdateHealth); once a
+   refresh fails with them older than NOT_UPDATED_AFTER_MS, the block says so
+   above them, in amber, with the time — a line, never an error card. The
+   header reports the last time any block received figures, not the time a
+   refresh was started.
+
    How far behind the SOURCE any figure can be is set server-side, not here —
    see CACHE_TTL in functions/api/provider-pricing-matrix.js and
    model-pricing-peer-matrix.js. This only makes sure an open page catches up.
 ═══════════════════════════════════════════════════════ */
 const REFRESH_EVERY_MS=10*60*1000;
-const DataRefreshContext=createContext({dataTick:0,embedTick:0});
+// reportUpdate is how a block tells App that figures landed, so the header can
+// say when the page last updated rather than when it last asked. A no-op
+// outside App.
+const DataRefreshContext=createContext({dataTick:0,embedTick:0,reportUpdate:()=>{}});
+
+/* How old a block's figures may get, with a refresh failing, before the block
+   says so. One missed refresh is routine — a slow upstream, a network blip —
+   and flagging it would cry wolf; by the second the page is two whole refresh
+   periods behind what it implies. Derived from the cadence, so changing one
+   cannot quietly break the other. 15 minutes today. */
+const NOT_UPDATED_AFTER_MS=1.5*REFRESH_EVERY_MS;
+
+/* One way to write a moment on this page — "Sep 21, 2026 · 06:33 UTC" — for
+   the header, the not-updated notes and the GPU capture time alike, so no two
+   places can disagree about the zone or the format. */
+function utcLabel(t){
+  const d=new Date(t);
+  const datePart=d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric",timeZone:"UTC"});
+  const timePart=String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0");
+  return datePart+" · "+timePart+" UTC";
+}
+
+/* "under a minute" · "12 min" · "3 h 5 min" · "2 days". Negative spans — a
+   reader's clock running behind the server's — clamp to zero rather than
+   reading as a time in the future. */
+function ageLabel(ms){
+  const m=Math.floor(Math.max(0,ms)/60000);
+  if(m<1)return"under a minute";
+  if(m<60)return m+" min";
+  const h=Math.floor(m/60);
+  if(h<48)return h+" h"+(m%60?" "+(m%60)+" min":"");
+  return Math.floor(h/24)+" days";
+}
+
+/* Per block: when its figures last arrived, and whether a refresh has failed
+   since. `behind` needs a FAILED refresh, not merely elapsed time, so a page
+   coming back from a long hide does not flash a warning while its catch-up
+   refresh is still in flight. fail() stamps a fresh time on every call, which
+   re-renders the note with its current age. */
+function useUpdateHealth(){
+  const {reportUpdate}=useContext(DataRefreshContext);
+  const[h,setH]=useState({okAt:null,failedAt:null});
+  const ok=useCallback(()=>{
+    const t=Date.now();
+    setH({okAt:t,failedAt:null});
+    reportUpdate(t);
+  },[reportUpdate]);
+  const fail=useCallback(()=>setH(s=>({...s,failedAt:Date.now()})),[]);
+  const behind=h.okAt!=null&&h.failedAt!=null&&h.failedAt-h.okAt>=NOT_UPDATED_AFTER_MS;
+  return{okAt:h.okAt,behind,ok,fail};
+}
+
+/* The one notice for figures older than the page implies. Amber like the
+   partial-data notes, not red like an error: these are real figures, just not
+   current ones, and the reader should weigh them rather than distrust them. */
+function NotCurrentNote({lead,children}){
+  return(
+    <div role="status" style={{display:"flex",gap:8,alignItems:"flex-start",fontSize:11,color:"#78350f",background:"#fffbeb",border:"0.5px solid #fcd34d",borderRadius:6,padding:"7px 11px",marginBottom:10,lineHeight:1.5}}>
+      <span aria-hidden="true" style={{width:7,height:7,borderRadius:"50%",background:"#d97706",flexShrink:0,marginTop:5}}/>
+      <span><b style={{fontWeight:600}}>{lead}</b> {children}</span>
+    </div>
+  );
+}
+
+function NotUpdatedNote({since}){
+  return(
+    <NotCurrentNote lead={"Not updated since "+utcLabel(since)+" ("+ageLabel(Date.now()-since)+" ago)."}>
+      The latest automatic update didn't come through, so what you see is what loaded then. The page keeps trying and replaces it as soon as an update lands.
+    </NotCurrentNote>
+  );
+}
 
 /* The cache-busting bucket in an embed's URL, fixed for the life of the embed.
    It used to be recomputed on every render, so a parent re-render after any
@@ -715,6 +797,7 @@ function ModelPricingHistoryBlock(){
   // them through a failed fetch would show one metric's numbers under the
   // other's label.
   const shownKey=useRef(null);
+  const health=useUpdateHealth(); // see AUTO-REFRESH
   useEffect(()=>{
     let cancelled=false;
     const key=metric+"|"+weight;
@@ -732,10 +815,10 @@ function ModelPricingHistoryBlock(){
     fetch("/api/provider-pricing-matrix?metric="+metric+"&weight="+weight+"&b="+BUILD,{cache:background?"no-cache":"default"})
       .then(r=>r.json())
       .then(d=>{ if(cancelled) return;
-        if(!d.success){ if(!background) setState({phase:"error",data:null,error:d.error||"Unknown error"}); }
-        else { shownKey.current=key; setState({phase:"ready",data:d,error:null}); }
+        if(!d.success){ health.fail(); if(!background) setState({phase:"error",data:null,error:d.error||"Unknown error"}); }
+        else { shownKey.current=key; setState({phase:"ready",data:d,error:null}); health.ok(); }
       })
-      .catch(e=>{ if(!cancelled&&!background) setState({phase:"error",data:null,error:e.message}); });
+      .catch(e=>{ if(cancelled) return; health.fail(); if(!background) setState({phase:"error",data:null,error:e.message}); });
     return ()=>{cancelled=true;};
   },[metric,weight,dataTick]);
 
@@ -792,6 +875,10 @@ function ModelPricingHistoryBlock(){
         </div>
         {state.phase==="loading"&&<span><Spin size={10}/></span>}
       </div>
+
+      {/* Only over figures that are on screen: switching metric or weight can
+          still raise the error card, and this note must never sit on one. */}
+      {state.phase==="ready"&&health.behind&&<NotUpdatedNote since={health.okAt}/>}
 
       {/* Per-provider upstream failure note — partial data still renders */}
       {state.data?.providerErrors?.length>0&&(
@@ -1029,6 +1116,7 @@ function ModelPricingMatrixTable(){
   const[gran,setGran]=useState("quarter");
   const {dataTick}=useContext(DataRefreshContext);
   const loaded=useRef(false); // true once real figures are on screen
+  const health=useUpdateHealth(); // see AUTO-REFRESH
   useEffect(()=>{
     let cancelled=false;
     // Source: /api/model-pricing-peer-matrix proxies pricepertoken's own
@@ -1051,11 +1139,12 @@ function ModelPricingMatrixTable(){
       .then(r=>r.ok?r.json():Promise.reject(new Error("HTTP "+r.status)))
       .then(d=>{
         if(cancelled)return;
-        if(!d||d.success===false){if(!background)setState({phase:"error",data:null,error:d?.error||"Unknown error"});return;}
+        if(!d||d.success===false){health.fail();if(!background)setState({phase:"error",data:null,error:d?.error||"Unknown error"});return;}
         loaded.current=true;
         setState({phase:"ready",data:d,error:null});
+        health.ok();
       })
-      .catch(e=>{if(!cancelled&&!background)setState({phase:"error",data:null,error:e.message||"Fetch failed"});});
+      .catch(e=>{if(cancelled)return;health.fail();if(!background)setState({phase:"error",data:null,error:e.message||"Fetch failed"});});
     return()=>{cancelled=true;};
   },[dataTick]);
 
@@ -1092,6 +1181,9 @@ function ModelPricingMatrixTable(){
         </div>
         <SegToggle value={gran} onChange={setGran} options={[{v:"quarter",label:"Quarterly"},{v:"month",label:"Monthly"}]}/>
       </div>
+      {/* Never beside the error card: behind needs figures that loaded, and
+          once they have, this block never goes back to an error. */}
+      {health.behind&&<NotUpdatedNote since={health.okAt}/>}
     </>
   );
 
@@ -1552,34 +1644,54 @@ function GPUHardwarePricingTab(){
   const {dataTick}=useContext(DataRefreshContext);
   // Per series: true once that series has real figures on screen.
   const loaded=useRef({data:false,hist:false,qHist:false,fHist:false});
+  // Per series, when its figures last arrived (see AUTO-REFRESH).
+  const hData=useUpdateHealth(),hHist=useUpdateHealth(),hQHist=useUpdateHealth(),hFHist=useUpdateHealth();
   useEffect(()=>{
     let cancelled=false;
     // Each series refreshes on its own (see AUTO-REFRESH). Once a series has
     // loaded, a failed refresh leaves it on screen rather than raising that
     // series' error; a success always clears a prior error, so a page whose
     // first load failed heals itself on the next tick.
-    const load=(name,url,ok,set,setErr)=>{
+    const load=(name,url,ok,set,setErr,health)=>{
       const background=loaded.current[name];
       fetch(url,{cache:background?"no-cache":"default"})
         .then(r=>r.ok?r.json():Promise.reject(r.status))
         .then(j=>{
           if(cancelled)return;
-          if(ok(j)){loaded.current[name]=true;set(j);setErr(false);}
-          else if(!background)setErr(true);
+          if(ok(j)){
+            loaded.current[name]=true;set(j);setErr(false);
+            // A listing the server answered from its last good copy goes on
+            // screen, labelled with its capture time, but it is not an update:
+            // it must not reset the clock or move the header's timestamp.
+            if(j.stale)health.fail();else health.ok();
+          }else{
+            health.fail();
+            if(!background)setErr(true);
+          }
         })
-        .catch(()=>{if(!cancelled&&!background)setErr(true);});
+        .catch(()=>{if(cancelled)return;health.fail();if(!background)setErr(true);});
     };
     // Build-hash keyed for the same reason as the peer matrix above. This one
     // answers with max-age=300, so a returning reader inside five minutes is
     // served from browser cache instead of re-running the upstream scrape.
-    load("data","/api/gpu-hardware-pricing-data?b="+BUILD,j=>j&&j.ok,setData,setLoadErr);
-    load("hist","/api/gpu-hardware-pricing-history?window=60",j=>j&&j.success,setHist,setHistErr);
-    load("qHist","/api/gpu-hardware-pricing-history?view=quarter&window=400",j=>j&&j.success,setQHist,setQHistErr);
-    load("fHist","/api/gpu-hardware-pricing-history?view=financial&window=400",j=>j&&j.success,setFHist,setFHistErr);
+    load("data","/api/gpu-hardware-pricing-data?b="+BUILD,j=>j&&j.ok,setData,setLoadErr,hData);
+    load("hist","/api/gpu-hardware-pricing-history?window=60",j=>j&&j.success,setHist,setHistErr,hHist);
+    load("qHist","/api/gpu-hardware-pricing-history?view=quarter&window=400",j=>j&&j.success,setQHist,setQHistErr,hQHist);
+    load("fHist","/api/gpu-hardware-pricing-history?view=financial&window=400",j=>j&&j.success,setFHist,setFHistErr,hFHist);
     return()=>{cancelled=true;};
   },[dataTick]);
 
   const updatedTxt=data?.sourceUpdatedAt?.text||null;
+
+  // Whether the listing on screen is current is ONE question with one answer,
+  // and every place that says "live" reads it from here. Not current when the
+  // server fell back to its last good copy (it marks that `stale`), or when
+  // this page has not managed to refresh it for a while. Either way the time
+  // shown is the listing's own capture time, not when this page received it.
+  const listingOld=!!data&&(data.stale===true||hData.behind);
+  const listingAt=data?Date.parse(data.fetchedAt):NaN;
+  // The history view on screen is whichever of the two the toggle shows.
+  const hShownHist=histView==="quarter"?hQHist:hHist;
 
   return(
     <>
@@ -1597,7 +1709,7 @@ function GPUHardwarePricingTab(){
       <div style={{display:"flex",gap:4,marginBottom:14,borderBottom:"0.5px solid #e5e7eb",paddingBottom:0}}>
         {[
           {id:"financial",label:"Financial Correlation",sub:"period averages · QoQ · YoY"},
-          {id:"infra",    label:"Infra Monitoring",     sub:"live pricing · quarter-close · operational history"},
+          {id:"infra",    label:"Infra Monitoring",     sub:(listingOld?"last captured pricing":"live pricing")+" · quarter-close · operational history"},
         ].map(t=>{
           const active=gpuSubtab===t.id;
           return(
@@ -1611,12 +1723,15 @@ function GPUHardwarePricingTab(){
       </div>
 
       {gpuSubtab==="financial"
-        ? <GPUFinancialSubtab fHist={fHist} fHistErr={fHistErr}/>
+        ? <GPUFinancialSubtab fHist={fHist} fHistErr={fHistErr}
+            notUpdatedSince={hFHist.behind?hFHist.okAt:null}/>
         : <GPUInfraMonitoringSubtab
             data={data} loadErr={loadErr} updatedTxt={updatedTxt}
+            listingOld={listingOld} listingAt={listingAt}
             histView={histView} setHistView={setHistView}
             qHist={qHist} qHistErr={qHistErr}
             hist={hist} histErr={histErr}
+            histNotUpdatedSince={hShownHist.behind?hShownHist.okAt:null}
             embedErr={err} setEmbedErr={setErr}
           />
       }
@@ -1631,7 +1746,7 @@ function GPUHardwarePricingTab(){
    - Primary rows (B200/H200/H100) always visible
    - Secondary rows (A100/GB200/L40S) behind "Show more" expansion
 ═══════════════════════════════════════════════════════ */
-function GPUFinancialSubtab({fHist,fHistErr}){
+function GPUFinancialSubtab({fHist,fHistErr,notUpdatedSince}){
   return(
     <>
       {/* Section label */}
@@ -1648,6 +1763,8 @@ function GPUFinancialSubtab({fHist,fHistErr}){
         </div>
       </div>
 
+      {notUpdatedSince!=null&&<NotUpdatedNote since={notUpdatedSince}/>}
+
       {/* Financial matrix */}
       <GPUFinancialCorrelationBlock fHist={fHist} fHistErr={fHistErr}/>
     </>
@@ -1661,7 +1778,7 @@ function GPUFinancialSubtab({fHist,fHistErr}){
    - Operational GPU Pricing History (quarter-close / QTD / daily)
    - Live reverse-proxied getdeploying table
 ═══════════════════════════════════════════════════════ */
-function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,qHist,qHistErr,hist,histErr,embedErr,setEmbedErr}){
+function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,listingOld,listingAt,histView,setHistView,qHist,qHistErr,hist,histErr,histNotUpdatedSince,embedErr,setEmbedErr}){
   const bucket=useEmbedBucket();
   const rows=data?.rows||[];
   const byName={};
@@ -1737,20 +1854,39 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
 
   return(
     <>
-      {/* Section label */}
+      {/* Section label. Says "live" and pulses only while the listing is
+          current (listingOld, decided once in GPUHardwarePricingTab), so the
+          heading can never vouch for prices the note below calls old. */}
       <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
-        <span style={{width:7,height:7,borderRadius:"50%",background:"#0e7490",display:"inline-block",animation:"gpupulse 2s infinite"}}/>
-        <span style={{fontSize:10,textTransform:"uppercase",letterSpacing:".09em",fontWeight:700,color:"#0e7490"}}>Live infra signal — current market plumbing</span>
+        <span style={{width:7,height:7,borderRadius:"50%",background:listingOld?"#d97706":"#0e7490",display:"inline-block",animation:listingOld?"none":"gpupulse 2s infinite"}}/>
+        <span style={{fontSize:10,textTransform:"uppercase",letterSpacing:".09em",fontWeight:700,color:listingOld?"#b45309":"#0e7490"}}>
+          {listingOld?"Infra signal — prices from an earlier capture":"Live infra signal — current market plumbing"}
+        </span>
       </div>
 
       {/* Title + subtitle */}
       <div style={{marginBottom:12}}>
-        <div style={{fontSize:14,fontWeight:700,color:"#111827",lineHeight:1.3}}>Live provider pricing, quarter-close history, and vendor table</div>
+        <div style={{fontSize:14,fontWeight:700,color:"#111827",lineHeight:1.3}}>
+          {listingOld?"Provider pricing (earlier capture), quarter-close history, and vendor table":"Live provider pricing, quarter-close history, and vendor table"}
+        </div>
         <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>
-          Current $/hr per SKU across the providers listing it · operational history uses quarter-close (last real snapshot in quarter).
+          {listingOld?"$/hr per SKU across the providers listing it, as last captured":"Current $/hr per SKU across the providers listing it"} · operational history uses quarter-close (last real snapshot in quarter).
           {updatedTxt&&<> · <b style={{color:"#6b7280",fontWeight:600}}>Source updated {updatedTxt}</b></>}
         </div>
       </div>
+
+      {/* Directly above the numbers it qualifies, so it cannot be scrolled past
+          on the way to them. The time is the listing's own capture time. */}
+      {listingOld&&(
+        <NotCurrentNote lead={Number.isFinite(listingAt)
+            ?"Prices captured "+utcLabel(listingAt)+" ("+ageLabel(Date.now()-listingAt)+" ago) — not current."
+            :"Prices from an earlier capture — not current."}>
+          {data.stale
+            ?"Current prices couldn't be loaded from the pricing source just now, so these are the most recent ones captured."
+            :"The latest automatic update didn't come through, so these are the most recent prices on this page."}
+          {" "}The page checks again automatically and switches to current prices as soon as they're available.
+        </NotCurrentNote>
+      )}
 
       {/* KPI cards */}
       {loadErr?(
@@ -1854,6 +1990,7 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,histView,setHistView,
         histView={histView} setHistView={setHistView}
         qHist={qHist} qHistErr={qHistErr}
         hist={hist} histErr={histErr}
+        notUpdatedSince={histNotUpdatedSince}
       />
 
       {/* Live embed */}
@@ -2910,7 +3047,7 @@ function renderFinResilienceRows(rows,growth,periods,series,partialKey,dim,bound
    default. Quarter view uses /api/gpu-hardware-pricing-history?view=quarter
    (real-only by default — backfill/synthetic seeds are excluded). Daily
    view remains available as a secondary drill-down. */
-function GPUHistoryShell({histView,setHistView,qHist,qHistErr,hist,histErr}){
+function GPUHistoryShell({histView,setHistView,qHist,qHistErr,hist,histErr,notUpdatedSince}){
   return(
     <div style={{marginBottom:14}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"}}>
@@ -2930,6 +3067,7 @@ function GPUHistoryShell({histView,setHistView,qHist,qHistErr,hist,histErr}){
           Investor lens · daily snapshots aggregated by calendar quarter (Q1 Jan–Mar, Q2 Apr–Jun, Q3 Jul–Sep, Q4 Oct–Dec UTC)
         </span>
       </div>
+      {notUpdatedSince!=null&&<NotUpdatedNote since={notUpdatedSince}/>}
       {histView==="quarter"
         ? <GPUQuarterlyBlock qHist={qHist} qHistErr={qHistErr}/>
         : <GPUHistoryBlock hist={hist} histErr={histErr} hideHeader/>
@@ -3750,9 +3888,10 @@ function PricingHistoryTab(){
    looks wrong here, it most likely looks the same way in google-dash, and the
    fix belongs there first.
 
-   Known exception: the Price Resilience badge wording and this header's
-   fetched-at label were fixed here first. README.md's divergence section
-   records what has moved out of parity and why.
+   Known exceptions: the Price Resilience badge wording, this header's
+   timestamp, and the not-current notes (see AUTO-REFRESH) were fixed here
+   first. README.md's divergence section records what has moved out of parity
+   and why.
 
    google-dash's App() carried seven tabs plus an Alphabet-specific KPI strip,
    the OpenRouterLiveEmbed hero and OpenRouterProviderRollupChart. Those belong
@@ -3762,32 +3901,30 @@ function PricingHistoryTab(){
    unchanged — only the title text, the tab list and the footer source line
    differ.
 ═══════════════════════════════════════════════════════ */
-// LIVE.fetchedAt is a build-time literal ("Apr 11 2026 · 17:45 UTC") baked in
-// when this dashboard was split out of google-dash. Every tab fetches its own
-// data live on mount, so that string was stale for every visitor from the day
-// it was written. This reports when those fetches actually ran — the same
-// clock reading refreshAll already writes when you press Refresh all.
-function nowUtcLabel(){
-  const d=new Date();
-  const datePart=d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric",timeZone:"UTC"});
-  const timePart=String(d.getUTCHours()).padStart(2,"0")+":"+String(d.getUTCMinutes()).padStart(2,"0")+":"+String(d.getUTCSeconds()).padStart(2,"0");
-  return datePart+" · "+timePart+" UTC";
-}
-
 export default function App(){
   const[tab,setTab]=useState("pricing");
-  const[fetchedAtLabel,setFetchedAtLabel]=useState(nowUtcLabel);
   const[refreshTick,setRefreshTick]=useState(0);
+
+  // The header's timestamp. It was first a build-time literal (LIVE.fetchedAt,
+  // "Apr 11 2026 · 17:45 UTC") that was stale for every visitor from the day it
+  // was written, then the moment a refresh STARTED — which read as "these
+  // figures are from now" even when every fetch after it failed. It is now the
+  // last time a block actually received figures, reported through
+  // useUpdateHealth. Monotonic: a slow response landing late cannot wind it back.
+  const[updatedAt,setUpdatedAt]=useState(null);
+  const reportUpdate=useCallback(t=>setUpdatedAt(p=>p!=null&&p>=t?p:t),[]);
 
   // See AUTO-REFRESH. lastRefresh is the single clock both triggers read, so
   // coming back to the page and the timer can never double-fire.
   const[ticks,setTicks]=useState({dataTick:0,embedTick:0});
+  // Memoised so a reported update re-renders App without handing every block
+  // a new context value.
+  const refreshCtx=useMemo(()=>({...ticks,reportUpdate}),[ticks,reportUpdate]);
   const lastRefresh=useRef(Date.now());
   useEffect(()=>{
     const refresh=(withEmbeds)=>{
       lastRefresh.current=Date.now();
       setTicks(t=>({dataTick:t.dataTick+1,embedTick:withEmbeds?t.embedTick+1:t.embedTick}));
-      setFetchedAtLabel(nowUtcLabel());
     };
     const due=()=>Date.now()-lastRefresh.current>=REFRESH_EVERY_MS;
     // Checked every minute rather than one ten-minute setInterval, so a page
@@ -3815,7 +3952,6 @@ export default function App(){
   function refreshAll(){
     setAllPressed(true);
     setTimeout(()=>setAllPressed(false),180);
-    setFetchedAtLabel(nowUtcLabel());
     // The tabs manage their own fetches, so there is no panel refresher to call.
     // Bumping the tick changes the React key on the active tab, which remounts
     // it and re-runs every fetch that tab owns — the same effect the panel
@@ -3838,7 +3974,7 @@ export default function App(){
         <div>
           <div style={{fontSize:15,fontWeight:600,color:"#111827"}}>AI Compute Pricing</div>
           <div style={{fontSize:11,color:"#9ca3af",marginTop:2}}>
-            Last refreshed {fetchedAtLabel} · updates automatically
+            {updatedAt!=null?<>Last loaded {utcLabel(updatedAt)} · updates automatically</>:"Updates automatically"}
           </div>
         </div>
         <button onClick={refreshAll} disabled={anyBusy}
@@ -3859,7 +3995,7 @@ export default function App(){
       </div>
 
       {/* Active tab */}
-      <DataRefreshContext.Provider value={ticks}>
+      <DataRefreshContext.Provider value={refreshCtx}>
       <div style={S.card}>
         {tab==="pricing"&&<ModelPricingTab key={"pricing-"+refreshTick}/>}
         {tab==="gpu"&&<GPUHardwarePricingTab key={"gpu-"+refreshTick}/>}

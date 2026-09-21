@@ -32,7 +32,7 @@
 // table, the KPI cards and the workbook cannot drift into three different answers.
 import { normalizeDailyPoint } from './_gpu-price-basis.js';
 import { GPU_TRACKED_SKUS } from './_gpu-tracked-skus.js';
-import { withEdgeCache } from './_edge-cache.js';
+import { withEdgeCache, schemaCacheKey } from './_edge-cache.js';
 
 const SOURCE_URL = 'https://getdeploying.com/gpus';
 const DETAIL_BASE = 'https://getdeploying.com/gpus/';
@@ -78,6 +78,17 @@ const POWER_TTL = 7 * 24 * 3600;
 // as stale rather than passed off as current.
 const LAST_GOOD_TTL = 24 * 3600;
 
+// A fallback listing must never be stored in the edge cache. Stored, it would
+// replay for the full EDGE_TTL after the source recovered — old prices
+// outliving the outage that was their only excuse — and every replay would
+// carry the servedAt of the first one. `private` is what keeps it out:
+// storable() in _edge-cache.js refuses a private response, so withEdgeCache
+// hands it back untouched, headers included, and puts nothing. The reader's
+// own browser may still keep it for a minute, which bounds how often one
+// reader can send us to a source that is refusing us. Pinned by
+// __tests__/gpu-stale-fallback.test.mjs.
+const FALLBACK_CACHE_CONTROL = 'private, max-age=60';
+
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
@@ -90,8 +101,11 @@ export async function onRequestGet(context) {
   );
 }
 
+// Versioned with the edge cache's schema: this copy is served under whatever
+// labels the current code prints, so it must be abandoned whenever the payload
+// changes shape, exactly as the response entries are.
 function lastGoodKey(baseUrl) {
-  return new Request(new URL('/__gpu-listing-last-good', baseUrl).toString(), { method: 'GET' });
+  return schemaCacheKey(baseUrl, '/__gpu-listing-last-good');
 }
 
 // The most recent listing that parsed, or null. Never throws: a failure to read
@@ -118,7 +132,7 @@ async function buildGpuPricing(context) {
         return json(
           { ...stale, stale: true, staleReason: 'upstream_' + list.status, servedAt: new Date().toISOString() },
           200,
-          'public, max-age=60, s-maxage=60',
+          FALLBACK_CACHE_CONTROL,
         );
       }
       return json({ ok: false, error: 'upstream_' + list.status }, 502);
@@ -169,7 +183,7 @@ async function buildGpuPricing(context) {
       return json(
         { ...stale, stale: true, staleReason: err.message || 'parse_error', servedAt: new Date().toISOString() },
         200,
-        'public, max-age=60, s-maxage=60',
+        FALLBACK_CACHE_CONTROL,
       );
     }
     return json({ ok: false, error: err.message || 'parse_error' }, 502);
