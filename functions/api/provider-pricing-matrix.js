@@ -988,8 +988,11 @@ async function buildProviderMatrix(request, metric, weight) {
         'come from OpenRouter\'s weekly per-model token volumes. Each model\'s ' +
         'mean price in the quarter is weighted by the tokens it served, so the ' +
         'cell reads as what was actually paid rather than a list-price mean. ' +
-        'Cells whose weights do not cover enough of a provider\'s volume are ' +
-        'withheld with a stated reason, never estimated. Where the source changed ' +
+        'A cell that cannot be measured this way is withheld as a measurement. ' +
+        'Where a ratio of usage-weighted to list price exists to scale from, the ' +
+        'cell carries an estimate instead: the quarter\'s list-price average ' +
+        'times that ratio, reported with its basis and the reason the ' +
+        'measurement was withheld. Where the source changed ' +
         'what it reports, each quarter averages one measure only and QoQ/YoY across ' +
         'the change are not computed.'
       : 'Upstream is pricepertoken.com\'s own historical pricing API. ' +
