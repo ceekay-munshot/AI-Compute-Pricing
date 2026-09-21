@@ -158,7 +158,9 @@ repo has deliberately moved first, and they are all presentation:
   *Stable/up* · *Mixed* · *Falling* where google-dash reads only *Stable/up* or
   *Falling*, and its period unit follows the month/quarter axis instead of
   always saying `2Q`. google-dash labelled a rising period "Falling" whenever
-  the period before it dipped.
+  the period before it dipped. The Excel export writes the same badge from the
+  same rule (`js/gpu-resilience.js`); it used to keep the old binary, so a
+  period could read *Mixed* on screen and *Falling* in the download.
 - **The header's timestamp** is the last time figures actually arrived, instead
   of a build-time literal that had gone five months stale. (For a while it was
   the time a refresh started, which vouched for freshness even when every fetch
@@ -168,6 +170,11 @@ repo has deliberately moved first, and they are all presentation:
   saying *Live* and shows the listing's capture time whenever the prices on
   screen come from an earlier capture. google-dash fetches once and never
   refreshes, so it has no failed refresh to report.
+- **GPU → Infra Monitoring no longer carries a *Source updated* clause.** It
+  read the listing's own "Updated …" caption with a pattern written for the
+  page as it read in April 2026, matched nothing on the page served now, and
+  so never rendered. It was removed rather than re-pointed at a wording nobody
+  has verified. The caption still shows inside the embedded page.
 - **Internal surfaces were removed from the UI.** The Representative Model Check
   strip (Firecrawl status, mappings-monitored counters, scrape timestamp) and
   both `Show diagnostics` disclosures are gone, taking the feed-integrity panel

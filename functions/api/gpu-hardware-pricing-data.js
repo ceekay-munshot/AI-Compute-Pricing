@@ -156,7 +156,6 @@ async function buildGpuPricing(context) {
     const parsed = parseRows(list.html);
     const power = await fetchBoardPower(context, parsed);
     const rows = parsed.map(r => withBoardPower(r, power));
-    const sourceUpdatedAt = parseUpdatedAt(list.html);
 
     // A board-power outage deliberately does NOT mark this no-store. Blank watt
     // cells are the accepted outcome; un-caching the response would instead put
@@ -167,7 +166,13 @@ async function buildGpuPricing(context) {
     const payload = {
         ok: true,
         sourceUrl: SOURCE_URL,
-        sourceUpdatedAt,
+        // No source date. The listing's "Updated …" caption was read with a
+        // pattern written against the page as it read in April 2026
+        // ("Updated April 21, 2026"). It matches nothing on the page the source
+        // serves now, so this field was null on every response and the clause
+        // that printed it never rendered. The caption's current wording has not
+        // been verified, and a guessed pattern could print a wrong date, so
+        // nothing reads it. The caption still shows inside the embedded page.
         fetchedAt: new Date().toISOString(),
         count: rows.length,
         // Operator-facing only; nothing here is rendered. One count per
@@ -754,24 +759,6 @@ function extractTds(row) {
     if (out.length >= 6) break;
   }
   return out;
-}
-
-
-function parseUpdatedAt(html) {
-  // Header markup:
-  //   <p class="text-muted-foreground body-2">
-  //     <span>Updated April 21, 2026</span>
-  const m = html.match(/Updated\s+([A-Z][a-z]+\s+\d{1,2},\s+\d{4})/);
-  if (!m) return null;
-  const iso = toIsoDate(m[1]);
-  return { text: m[1], iso };
-}
-
-function toIsoDate(str) {
-  // "April 21, 2026" → "2026-04-21"
-  const d = new Date(str + ' UTC');
-  if (isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
 }
 
 function stripTags(s) {

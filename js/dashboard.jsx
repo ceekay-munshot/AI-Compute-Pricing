@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo, Fragment, createCont
 import { BarChart, Bar, LineChart, Line, ComposedChart, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, CartesianGrid, Legend } from "recharts";
 import { buildXlsx, downloadXlsx } from "./xlsx-export.js";
 import { buildGPUPricingWorkbook, gpuWorkbookFilename } from "./gpu-xlsx-report.js";
+import { resilienceSignal, LOW_PRICED_COVERAGE } from "./gpu-resilience.js";
 
 /* ─── Live data fetched by me right now (Apr 11 2026) ───────
    Sources:
@@ -1799,8 +1800,6 @@ function GPUHardwarePricingTab(){
     return()=>{cancelled=true;};
   },[dataTick]);
 
-  const updatedTxt=data?.sourceUpdatedAt?.text||null;
-
   // Whether the listing on screen is current is ONE question with one answer,
   // and every place that says "live" reads it from here. Not current when the
   // server fell back to its last good copy (it marks that `stale`), or when
@@ -1848,7 +1847,7 @@ function GPUHardwarePricingTab(){
         ? <GPUFinancialSubtab fHist={fHist} fHistErr={fHistErr}
             notUpdatedSince={hFHist.behind?hFHist.okAt:null}/>
         : <GPUInfraMonitoringSubtab
-            data={data} loadErr={loadErr} updatedTxt={updatedTxt}
+            data={data} loadErr={loadErr}
             listingOld={listingOld} listingAt={listingAt}
             histView={histView} setHistView={setHistView}
             qHist={qHist} qHistErr={qHistErr}
@@ -1900,7 +1899,7 @@ function GPUFinancialSubtab({fHist,fHistErr,notUpdatedSince}){
    - Operational GPU Pricing History (quarter-close / QTD / daily)
    - Live reverse-proxied getdeploying table
 ═══════════════════════════════════════════════════════ */
-function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,listingOld,listingAt,histView,setHistView,qHist,qHistErr,hist,histErr,histNotUpdatedSince,embedErr,setEmbedErr}){
+function GPUInfraMonitoringSubtab({data,loadErr,listingOld,listingAt,histView,setHistView,qHist,qHistErr,hist,histErr,histNotUpdatedSince,embedErr,setEmbedErr}){
   const bucket=useEmbedBucket();
   const rows=data?.rows||[];
   const byName={};
@@ -2003,7 +2002,6 @@ function GPUInfraMonitoringSubtab({data,loadErr,updatedTxt,listingOld,listingAt,
         </div>
         <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>
           {listingOld?"$/hr per SKU across the providers listing it, as last captured":"Current $/hr per SKU across the providers listing it"} · operational history uses quarter-close (last real snapshot in quarter).
-          {updatedTxt&&<> · <b style={{color:"#6b7280",fontWeight:600}}>Source updated {updatedTxt}</b></>}
         </div>
       </div>
 
@@ -2452,8 +2450,10 @@ function finIsPartial(rec,partialKey){
   return !!rec[partialKey];
 }
 // Below this share of priced days a period average is still shown, but every
-// number derived from it is marked — a 10-day April stub is not a month.
-const FIN_LOW_COVERAGE=0.75;
+// number derived from it is marked — a 10-day April stub is not a month. The
+// threshold lives beside the resilience rule so the Excel export marks the
+// same periods this table does.
+const FIN_LOW_COVERAGE=LOW_PRICED_COVERAGE;
 
 function finPeriodRec(series,sku,periodId){
   const arr=series[sku]||[];
@@ -3088,27 +3088,19 @@ function renderFinProviderRows(rows,series,periods,dim,boundaryIdx){
   });
 }
 
-// Per-(SKU, period) price resilience signal. For period P it reads the growth
-// at P (P vs P-1) and the growth at P-1 (P-1 vs P-2). Both >= 0 means the
-// price held or rose across two consecutive completed periods → "Stable/up
-// 2Q"/"2M" (green; the investor-side "for prices NOT to go down is a big
-// deal" read). Both < 0 is "Falling", and one of each is "Mixed" — grey for
-// both, since neither is a resilience signal, but the label no longer claims
-// a direction the two readings do not agree on.
+// Per-(SKU, period) price resilience signal. The rule — which periods are
+// graded, and Stable/up · Mixed · Falling over a 2M/2Q look-back — is
+// resilienceSignal() in js/gpu-resilience.js, the same call the Excel export
+// makes, so the download cannot grade a period differently from this table.
+// Stable/up is green (the investor-side "for prices NOT to go down is a big
+// deal" read); Mixed and Falling are grey, since neither is a resilience
+// signal.
 //
-// Three things this must never do, because each turns a data gap into a
-// confident-looking verdict:
-//   1. resolve P-1 by array position. The column axis is continuous now, so
-//      a stalled feed puts an empty column in the middle of it; stepping
-//      back one slot would compare across the hole.
-//   2. grade a period whose price coverage is zero. A month with provider
-//      counts but no prices has no growth on either side, and must read
-//      "no price data", not "Falling".
-//   3. grade a still-running period, or one whose two-period look-back leans
-//      on a thinly-priced stub, without saying so.
-//   4. grade across a change in what the source publishes. The two-period
-//      look-back needs three periods measured the same way; spanning the
-//      floor→median change would read a units change as a price trend.
+// What stays here is resolving the three periods the rule reads and saying
+// why a cell is blank. P-1 and P-2 are resolved by calendar id, never by array
+// position: the column axis is continuous, so a stalled feed puts an empty
+// column in the middle of it, and stepping back one slot would compare across
+// the hole.
 function renderFinResilienceRows(rows,growth,periods,series,partialKey,dim,boundaryIdx){
   const blank=(key,title,bStyle)=>(
     <td key={key} style={{...finTdDim,...bStyle}} title={title}><span style={{color:"#d1d5db"}}>&mdash;</span></td>
@@ -3121,57 +3113,42 @@ function renderFinResilienceRows(rows,growth,periods,series,partialKey,dim,bound
         {periods.map((p,idx)=>{
           const bStyle=finBoundaryStyle(idx===boundaryIdx);
           const cur=finPeriodRec(series,row.sku,p.period);
-
-          // No capture at all for this calendar period.
-          if(!cur)return blank(p.period,"No capture recorded for "+p.label+".",bStyle);
-
-          // Captured, but the feed delivered no usable price — provider
-          // counts alone cannot produce a resilience read.
-          if(!finHasPrice(cur))return blank(p.period,p.label+" was captured but carries no price data, so no resilience signal can be computed.",bStyle);
-
-          // Still running: a part-period average is not comparable.
-          if(p[partialKey]||finIsPartial(cur,partialKey))
-            return blank(p.period,p.label+" is still in progress.",bStyle);
-
           const priorId=finPriorPeriodId(p.period);
           const prior=priorId?finPeriodRec(series,row.sku,priorId):null;
-          const cqp=row_g[p.period];
-          const pqp=priorId?row_g[priorId]:null;
-
-          // A resilience read spans three periods. If any adjacent pair among
-          // them was measured differently, the "trend" would be the source
-          // changing units, not the price holding.
           const prior2Id=priorId?finPriorPeriodId(priorId):null;
           const prior2=prior2Id?finPeriodRec(series,row.sku,prior2Id):null;
-          const chain=[cur,prior,prior2].map(finBasis);
-          if(chain[0]&&chain.some(b=>b&&b!==chain[0]))
-            return blank(p.period,"Spans a change in what the source publishes ("+chain.filter(Boolean).map(b=>FIN_BASIS_SHORT[b]).join(" vs ")+"), so a two-period trend cannot be read across it.",bStyle);
+          const cqp=row_g[p.period];
+          const pqp=priorId?row_g[priorId]:null;
+          const curCov=finPricedCoverage(cur), priorCov=finPricedCoverage(prior);
+          const sig=resilienceSignal({
+            captured:!!cur,
+            priced:finHasPrice(cur),
+            inProgress:!!(p[partialKey]||finIsPartial(cur,partialKey)),
+            bases:[cur,prior,prior2].map(finBasis),
+            growth:cqp,priorGrowth:pqp,
+            coverage:curCov,priorCoverage:priorCov,
+            quarterly:partialKey==="isQTD",
+          });
 
-          if(cqp==null||pqp==null||!isFinite(cqp)||!isFinite(pqp))
+          if(sig.state==="no-capture")return blank(p.period,"No capture recorded for "+p.label+".",bStyle);
+          // Provider counts alone cannot produce a resilience read.
+          if(sig.state==="no-price")return blank(p.period,p.label+" was captured but carries no price data, so no resilience signal can be computed.",bStyle);
+          if(sig.state==="in-progress")return blank(p.period,p.label+" is still in progress.",bStyle);
+          if(sig.state==="measure-changed")
+            return blank(p.period,"Spans a change in what the source publishes ("+sig.bases.map(b=>FIN_BASIS_SHORT[b]).join(" vs ")+"), so a two-period trend cannot be read across it.",bStyle);
+          if(sig.state==="no-lookback")
             return blank(p.period,"Needs two consecutive completed periods of growth; not available at "+p.label+".",bStyle);
 
-          // "2Q" was hardcoded when this table only had a quarterly view; the
-          // monthly view renders the same badges, so the unit follows the axis.
-          const span=partialKey==="isQTD"?"2Q":"2M";
-          // Three states, not two. The old binary called everything that was
-          // not up-twice "Falling", which labelled a rising period as falling
-          // whenever the period before it happened to dip — B200 read
-          // "Falling" at +2.0% because May was -0.9%. Only both-down is
-          // falling; one up one down is mixed.
-          const stable=cqp>=0&&pqp>=0;
-          const falling=cqp<0&&pqp<0;
-          const label=stable?"Stable/up "+span:falling?"Falling "+span:"Mixed";
+          const stable=sig.state==="stable";
           const bg=stable?"#ecfdf5":"#f3f4f6";
           const fg=stable?"#047857":"#6b7280";
-          const curCov=finPricedCoverage(cur), priorCov=finPricedCoverage(prior);
-          const thin=(curCov!=null&&curCov<FIN_LOW_COVERAGE)||(priorCov!=null&&priorCov<FIN_LOW_COVERAGE);
           const title=p.label+" growth "+cqp.toFixed(1)+"% · prior period growth "+pqp.toFixed(1)+"%"
             +(curCov!=null?" · "+Math.round(curCov*100)+"% priced":"")
-            +(thin?" · thin coverage on one side — indicative only":"");
+            +(sig.thin?" · thin coverage on one side — indicative only":"");
           return(
             <td key={p.period} style={{...finTdDim,...bStyle}}>
               <span style={{fontSize:9,fontWeight:600,padding:"1px 6px",borderRadius:3,background:bg,color:fg,whiteSpace:"nowrap"}} title={title}>
-                {label}{thin&&<sup style={{color:"#b45309",fontSize:8,fontWeight:700,marginLeft:1}}>&deg;</sup>}
+                {sig.label}{sig.thin&&<sup style={{color:"#b45309",fontSize:8,fontWeight:700,marginLeft:1}}>&deg;</sup>}
               </span>
             </td>
           );

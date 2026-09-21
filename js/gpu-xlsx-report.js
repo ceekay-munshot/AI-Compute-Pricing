@@ -16,6 +16,7 @@
  * equally defensible from the seller side and a silent choice would mislead.
  */
 import {XS,colLetter} from "./xlsx-export.js";
+import {resilienceSignal,resilienceSpan,LOW_PRICED_COVERAGE} from "./gpu-resilience.js";
 
 const H  =v=>({v,s:XS.header});
 const HL =v=>({v,s:XS.headerLeft});
@@ -90,7 +91,9 @@ function priorPeriodId(periodId){
   if(m){const y=+m[1],n=+m[2];return n===1?(y-1)+"-12":y+"-"+String(n-1).padStart(2,"0");}
   return null;
 }
-const LOW_COVERAGE=0.75;
+// The threshold the dashboard marks thin periods with, from the module that
+// holds the resilience rule, so the two surfaces mark the same periods.
+const LOW_COVERAGE=LOW_PRICED_COVERAGE;
 
 /* ─── Levels sheet: every captured measure, stacked by section ─── */
 function levelsSheet(name,heading,sub,labels,series,skus,partialKey){
@@ -183,25 +186,41 @@ function growthSheet(name,heading,sub,labels,series,growthMap,yoyMap,skus,partia
   grid("YoY growth — headline price",yoyMap,
     "Same period one year earlier. Blank until a year of history exists.");
 
-  // Resilience signal, computed exactly as the dashboard renders it so the
-  // export can be audited against the screen.
+  // Resilience signal. The rule is resilienceSignal() in gpu-resilience.js,
+  // the same call the dashboard's table makes, so the export cannot grade a
+  // period differently from the screen. Each ungraded state is named, because
+  // a spreadsheet cell has no tooltip to carry the reason.
+  const quarterly=partialKey==="isQTD";
+  const span=resilienceSpan(quarterly);
+  const unit=quarterly?"quarters":"months";
   rows.push(section("Price resilience signal",width));
-  rows.push([NOTE("\"Stable/up\" = headline price held or rose across two consecutive completed periods (both growth readings >= 0). \"Falling\" = it did not. Blank where the period has no price, is still running, or the two-period look-back is unavailable. A trailing ° marks a reading that rests on a period with under "+Math.round(LOW_COVERAGE*100)+"% priced days.")]);
+  rows.push([NOTE("\"Stable/up "+span+"\" = headline price held or rose across two consecutive completed "+unit+" (both growth readings >= 0). \"Falling "+span+"\" = it fell in both (both readings < 0). \"Mixed\" = one reading up and one down, so no direction is claimed. \"measure changed\" = the look-back spans a change in what the source publishes, so no trend is read across it. Blank where the two-period look-back is unavailable. A trailing ° marks a reading that rests on a period with under "+Math.round(LOW_COVERAGE*100)+"% priced days.")]);
   rows.push(head);
   for(const sku of skus){
     const g=growthMap[sku.sku]||{};
     rows.push([LBL(sku.shortLabel),...labels.map(l=>{
       const rec=recFor(series,sku.sku,l.period);
-      if(!rec)return{v:"no capture",s:XS.badgeMuted};
-      if(!hasPrice(rec))return{v:"no price",s:XS.badgeWarn};
-      if(l[partialKey]||rec[partialKey])return{v:"in progress",s:XS.badgeMuted};
       const pid=priorPeriodId(l.period);
-      const cur=g[l.period],prv=pid?g[pid]:null;
-      if(cur==null||prv==null||!isFinite(cur)||!isFinite(prv))return{v:"",s:XS.badgeMuted};
-      const cc=pricedCov(rec),pc=pricedCov(pid?recFor(series,sku.sku,pid):null);
-      const thin=(cc!=null&&cc<LOW_COVERAGE)||(pc!=null&&pc<LOW_COVERAGE);
-      const stable=cur>=0&&prv>=0;
-      return{v:(stable?"Stable/up":"Falling")+(thin?" °":""),s:stable?XS.badgeGood:XS.badgeMuted};
+      const prior=pid?recFor(series,sku.sku,pid):null;
+      const pid2=pid?priorPeriodId(pid):null;
+      const prior2=pid2?recFor(series,sku.sku,pid2):null;
+      const sig=resilienceSignal({
+        captured:!!rec,
+        priced:hasPrice(rec),
+        inProgress:!!(l[partialKey]||(rec&&rec[partialKey])),
+        bases:[rec,prior,prior2].map(basisOf),
+        growth:g[l.period],
+        priorGrowth:pid?g[pid]:null,
+        coverage:pricedCov(rec),
+        priorCoverage:pricedCov(prior),
+        quarterly,
+      });
+      if(sig.state==="no-capture")return{v:"no capture",s:XS.badgeMuted};
+      if(sig.state==="no-price")return{v:"no price",s:XS.badgeWarn};
+      if(sig.state==="in-progress")return{v:"in progress",s:XS.badgeMuted};
+      if(sig.state==="measure-changed")return{v:"measure changed",s:XS.badgeWarn};
+      if(sig.state==="no-lookback")return{v:"",s:XS.badgeMuted};
+      return{v:sig.label+(sig.thin?" °":""),s:sig.state==="stable"?XS.badgeGood:XS.badgeMuted};
     })]);
   }
 
