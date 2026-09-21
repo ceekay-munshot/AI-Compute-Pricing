@@ -1344,8 +1344,11 @@ function ModelPricingMatrixTable(){
     const matchedSummary=(rep.matchedModels||[]).length
       ? rep.matchedModels.length+" upstream variant"+(rep.matchedModels.length===1?"":"s")+" matched: "+rep.matchedModels.join(", ")
       : "no upstream model matched";
+    // Listings that matched the name but that the source prices as a
+    // separate SKU, each with the evidence — left out of every figure.
+    const setAside=(rep.setAsideModels||[]).map(s=>"Left out "+s.model+" — "+s.reason);
     return(
-      <td style={tdFirst} title={matchedSummary}>
+      <td style={tdFirst} title={[matchedSummary,...setAside].join("\n")}>
         <div style={{lineHeight:1.25}}>
           <div style={{fontWeight:600,color:"#111827"}}>{rep.label}</div>
           <div style={{fontSize:10,color:"#9ca3af",fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>{rep.modelDisplay}</div>
@@ -1368,14 +1371,19 @@ function ModelPricingMatrixTable(){
     </tr>
   );
   // A refused change is named, with its reason on hover — never a bare dash,
-  // which would read as "no data".
+  // which would read as "no data". Two refusals: the source changed what it
+  // reports, or the two periods share no listing of the model (the change
+  // would compare different listings). Same amber tag as measureChangedTag.
+  const listingChangedTag=()=><span style={{color:"#b45309",fontSize:9,fontWeight:600,whiteSpace:"nowrap"}}>listing&nbsp;changed</span>;
   const renderChangeRow=(rep,key)=>(
     <tr key={key+"-"+rep.key}>
       {renderModelLabel(rep)}
       {periods.map((p,i)=>{
         const val=rep[key]?.[p.id];
-        const why=val==null?rep.measureChanged?.[key]?.[p.id]:null;
-        return(<td key={p.id} style={{...tdDim,...bStyle(i)}} title={why||undefined}>{why?measureChangedTag():fmtChange(val)}</td>);
+        const measureWhy=val==null?rep.measureChanged?.[key]?.[p.id]:null;
+        const listingWhy=val==null&&!measureWhy?rep.listingChanged?.[key]?.[p.id]:null;
+        const why=measureWhy||listingWhy;
+        return(<td key={p.id} style={{...tdDim,...bStyle(i)}} title={why||undefined}>{measureWhy?measureChangedTag():listingWhy?listingChangedTag():fmtChange(val)}</td>);
       })}
     </tr>
   );
@@ -1527,7 +1535,7 @@ function ModelPricingMatrixTable(){
       )}
 
       <div style={{fontSize:10,color:"#9ca3af",lineHeight:1.5,marginTop:6}}>
-        <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> Prices use pricepertoken historical model-level rows, averaged by {G.bucketWord} and shown as $/1M tokens. {G.chgLabel}/YoY compare only valid full historical periods; {G.partialBadge} growth is suppressed. Fixed representative models keep growth math comparable; the Frontier Reference shows how the latest frontier label — and its price — change by period. Alternate-billing SKUs (<code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:batch</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:beta</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:thinking</code>) and sibling product lines (GPT-5 Pro vs GPT-5, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>-customtools</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>-fast</code>) are excluded from every average — each would otherwise register as a price move when only the upstream catalog changed. Firecrawl is used only as an advisory model-discovery signal, never for pricing math.
+        <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> Prices use pricepertoken historical model-level rows, averaged by {G.bucketWord} and shown as $/1M tokens. {G.chgLabel}/YoY compare only valid full historical periods; {G.partialBadge} growth is suppressed. Fixed representative models keep growth math comparable; the Frontier Reference shows how the latest frontier label — and its price — change by period. Alternate-billing SKUs (<code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:batch</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:beta</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:thinking</code>) and sibling product lines (GPT-5 Pro vs GPT-5, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>-customtools</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>-fast</code>) are excluded from every average — each would otherwise register as a price move when only the upstream catalog changed. Each row is priced from the model's own listing; a dated snapshot the source prices differently from the model itself is a separate SKU and is left out (hover the model name), and {G.chgLabel}/YoY compare only the listings both periods carry, so a listing arriving or leaving never reads as a price move. Firecrawl is used only as an advisory model-discovery signal, never for pricing math.
         {data.measureBreaks?.summary&&<> Where the source changed what it reports mid-history (the dashed rule), each period averages one measure only; {G.chgLabel}/YoY across the change read <span style={{color:"#b45309",fontWeight:600}}>measure changed</span> rather than a percentage, and a price reported after it carries a <sup style={{color:"#b45309",fontWeight:700}}>&dagger;</sup>.</>}
       </div>
     </div>
