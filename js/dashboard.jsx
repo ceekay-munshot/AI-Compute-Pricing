@@ -206,8 +206,38 @@ async function fetchFiling(){
 /* ═══════════════════════════════════════════════════════
    FILING ANCHOR ROW
 ═══════════════════════════════════════════════════════ */
-function PricingSharePartialView({ header, quarter }){
+// "A", "A and B", "A, B and C" — how the Pricing / Share notes name providers.
+function joinNames(names){
+  return names.length<3?names.join(" and "):names.slice(0,-1).join(", ")+" and "+names[names.length-1];
+}
+
+// What a market share on the Pricing / Share block is a share OF, and which
+// captured days it leaves out — with its trailing separator, for the caveat
+// strip. Shared by the partial and the full view so the two cannot describe
+// the same number differently.
+function ShareBasisNote({ basis, days }){
+  if(!basis||!basis.depth) return null;
+  const x=basis.excludedDays||{};
+  const parts=[
+    x.backfill?x.backfill+" gap-fill "+(x.backfill===1?"copy":"copies")+" of a later capture":null,
+    x.notModelRanking?x.notModelRanking+" whose list is not a model ranking (most rows name no model maker)":null,
+    x.incompleteRanking?x.incompleteRanking+" whose ranking has ranks missing":null,
+  ].filter(Boolean);
+  return(
+    <>
+      <span><b style={{color:"#374151"}}>Share:</b> each counted day's share of the top {basis.depth} OpenRouter models' weekly tokens, averaged over every counted day of the quarter{days?" ("+days+")":""}; a provider outside the top {basis.depth} on a day counts as zero for it, and one outside it on every counted day has no share{parts.length?". Of all captured days, not counted: "+joinNames(parts):""}</span>
+      <span>·</span>
+    </>
+  );
+}
+
+function PricingSharePartialView({ header, quarter, basis }){
   const rows=(quarter.rows||[]).filter(r=>typeof r.priceQoq==="number"&&typeof r.shareAvg==="number");
+  // Providers whose price change was refused because the source changed what
+  // it reports between the quarters. Their share is real, so they stay in the
+  // table; they have no price change, so they stay off the chart — and are
+  // named, instead of vanishing.
+  const refusedRows=(quarter.rows||[]).filter(r=>r.priceMeasureChanged&&typeof r.shareAvg==="number");
   const W=520,H=360,pL=44,pR=18,pT=22,pB=32;
   const xMax=Math.max(5,...rows.map(r=>Math.abs(r.priceQoq*100)))*1.15;
   const yMax=Math.max(5,...rows.map(r=>r.shareAvg))*1.12;
@@ -247,10 +277,11 @@ function PricingSharePartialView({ header, quarter }){
   });
 
   // Sort table by current share descending so the dominant provider reads first
-  const tableRows=[...rows].sort((a,b)=>b.shareAvg-a.shareAvg);
+  const tableRows=[...rows,...refusedRows].sort((a,b)=>b.shareAvg-a.shareAvg);
   const biggestCut=[...rows].filter(r=>r.priceQoq<0).sort((a,b)=>a.priceQoq-b.priceQoq)[0];
   const biggestUp=[...rows].filter(r=>r.priceQoq>0).sort((a,b)=>b.priceQoq-a.priceQoq)[0];
-  const topShare=[...rows].sort((a,b)=>b.shareAvg-a.shareAvg)[0];
+  // Share needs no price change: a refused provider can hold the largest share.
+  const topShare=tableRows[0];
 
   return(
     <div style={{marginBottom:16}}>
@@ -258,12 +289,17 @@ function PricingSharePartialView({ header, quarter }){
       <div style={{fontSize:11,color:"#6b7280",marginBottom:8}}>
         Quarter: <b style={{color:"#111827",fontFamily:"monospace"}}>{quarter.quarter}</b>
         {quarter.partial&&<span style={{marginLeft:5,fontSize:9,background:"#ecfeff",color:"#0e7490",padding:"1px 5px",borderRadius:3,fontWeight:600}}>QTD</span>}
-        <span style={{color:"#9ca3af"}}> · {rows.length} providers · partial view</span>
+        <span style={{color:"#9ca3af"}}> · {tableRows.length} providers · partial view</span>
       </div>
       {/* Explanation banner */}
       <div style={{background:"#fffbeb",border:"0.5px solid #fde68a",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:11,color:"#78350f",lineHeight:1.45}}>
-        <b>Share QoQ pending.</b> Prior-quarter KV snapshots not yet captured, so share-delta can't be computed. Showing Price QoQ vs <i>current</i> share % instead — full view returns automatically once the next quarter of snapshots lands.
+        <b>Share QoQ pending.</b> No quarter yet pairs a computed price change with a share change against the quarter before, so the full read-through can't be drawn. Showing Price QoQ vs <i>current</i> share % instead — the full view returns automatically once one does.
       </div>
+      {refusedRows.length>0&&(
+        <div style={{fontSize:11,color:"#92400e",marginTop:-4,marginBottom:8,lineHeight:1.5}}>
+          {joinNames(refusedRows.map(r=>r.label))} {refusedRows.length===1?"is":"are"} left off the chart: the source changed how it reports {refusedRows.length===1?"its":"their"} prices between these quarters, so {refusedRows.length===1?"its":"their"} price change is not computed.
+        </div>
+      )}
       {/* Callouts limited to what's computable from a single quarter */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(210px,1fr))",gap:8,marginBottom:12}}>
         {biggestCut&&<div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"8px 10px"}}>
@@ -279,7 +315,7 @@ function PricingSharePartialView({ header, quarter }){
         {topShare&&<div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"8px 10px"}}>
           <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:".07em",fontWeight:700,color:"#7c3aed"}}>Largest share holder</div>
           <div style={{fontSize:13,fontWeight:700,color:"#111827",marginTop:2}}>{topShare.label}</div>
-          <div style={{fontSize:10,color:"#6b7280",marginTop:2,lineHeight:1.4}}>{topShare.shareAvgLabel} of observed tokens · price {topShare.priceQoqLabel}</div>
+          <div style={{fontSize:10,color:"#6b7280",marginTop:2,lineHeight:1.4}}>{topShare.shareAvgLabel} of {basis&&basis.depth?"the top "+basis.depth+" models'":"ranked"} tokens · price {topShare.priceQoqLabel}</div>
         </div>}
       </div>
       <div style={{display:"grid",gridTemplateColumns:"minmax(360px,1fr) minmax(420px,2fr)",gap:10}}>
@@ -339,7 +375,8 @@ function PricingSharePartialView({ header, quarter }){
                     {r.label}
                   </td>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",color:"#111827"}}>{r.avgLabel}</td>
-                  <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",fontWeight:600,color:r.priceQoq>0?"#dc2626":r.priceQoq<0?"#059669":"#6b7280"}}>{r.priceQoqLabel}</td>
+                  <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",fontWeight:600,color:r.priceQoq>0?"#dc2626":r.priceQoq<0?"#059669":"#6b7280"}}
+                      title={r.priceMeasureChanged?(r.priceQoqReason||undefined):undefined}>{r.priceMeasureChanged?measureChangedTag():r.priceQoqLabel}</td>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",color:"#111827"}}>{r.shareAvgLabel}</td>
                 </tr>
               ))}
@@ -348,8 +385,9 @@ function PricingSharePartialView({ header, quarter }){
         </div>
       </div>
       <div style={{display:"flex",flexWrap:"wrap",gap:"4px 10px",fontSize:10,color:"#6b7280",marginTop:8,lineHeight:1.5}}>
-        <span><b style={{color:"#374151"}}>Scope:</b> partial view — Price QoQ shown, Share QoQ unavailable until a prior-quarter KV snapshot exists</span>
+        <span><b style={{color:"#374151"}}>Scope:</b> partial view — Price QoQ shown, Share QoQ unavailable until a comparable prior quarter exists</span>
         <span>·</span>
+        <ShareBasisNote basis={basis} days={quarter.shareDays?quarter.shareDays+" in "+quarter.quarter:""}/>
         <span><b style={{color:"#374151"}}>Sources:</b> pricepertoken provider pricing history + OpenRouter snapshots</span>
       </div>
     </div>
@@ -441,7 +479,7 @@ function PricingShareSignalBlock(){
      view — Price QoQ vs current Share % — so the block stays useful
      instead of showing a dead empty state until Q3 snapshots accumulate. */
   if(!latest||!latest.rows||!latest.rows.length){
-    const partialQuarter=(d.quarters||[]).find(q=>(q.rows||[]).some(r=>typeof r.priceQoq==="number"&&typeof r.shareAvg==="number"));
+    const partialQuarter=(d.quarters||[]).find(q=>(q.rows||[]).some(r=>typeof r.shareAvg==="number"&&(typeof r.priceQoq==="number"||r.priceMeasureChanged)));
     if(!partialQuarter){
       return(
         <div style={{marginBottom:16}}>
@@ -453,7 +491,7 @@ function PricingShareSignalBlock(){
         </div>
       );
     }
-    return <PricingSharePartialView header={header} quarter={partialQuarter}/>;
+    return <PricingSharePartialView header={header} quarter={partialQuarter} basis={d.shareBasis}/>;
   }
 
   /* SVG quadrant — Price QoQ % on x, Share QoQ pp on y.
@@ -468,7 +506,15 @@ function PricingShareSignalBlock(){
   // is real — but have no x position, so they are kept off the chart.
   const refusedRows=latest.rows.filter(r=>r.priceMeasureChanged&&typeof r.shareQoqPP==="number");
   const tableRows=[...rows,...refusedRows];
-  const refusedNames=(n=>n.length<3?n.join(" and "):n.slice(0,-1).join(", ")+" and "+n[n.length-1])(refusedRows.map(r=>r.label));
+  const refusedNames=joinNames(refusedRows.map(r=>r.label));
+  // Neither list reaches the chart or the table, so each is named instead of
+  // vanishing: providers with a share now but none in the prior quarter (no
+  // share change to plot), and providers with a share then but none now.
+  const noPriorShare=latest.rows.filter(r=>typeof r.shareQoqPP!=="number");
+  const noShareNow=latest.notInTopN||[];
+  const depth=d.shareBasis&&d.shareBasis.depth;
+  const topN=depth?"the top "+depth:"the ranking";
+  const priorQ=(d.quarters||[]).find(q=>q.quarter===d.priorComparable);
   let xMax=Math.max(5,...rows.map(r=>Math.abs(r.priceQoq*100)))*1.15;
   let yMax=Math.max(1,...rows.map(r=>Math.abs(r.shareQoqPP)))*1.3;
   const sx=(v)=>pL+((v+xMax)/(2*xMax))*(W-pL-pR);
@@ -523,6 +569,12 @@ function PricingShareSignalBlock(){
         <div style={{fontSize:11,color:"#92400e",marginTop:-4,marginBottom:8,lineHeight:1.5}}
              title={d.measureBreaks?.summary?d.measureBreaks.summary.headline+" "+d.measureBreaks.summary.detail:undefined}>
           {refusedNames} {refusedRows.length===1?"is":"are"} left off the chart: the source changed how it reports {refusedRows.length===1?"its":"their"} prices between these quarters, so {refusedRows.length===1?"its":"their"} price change is not computed.
+        </div>
+      )}
+      {(noPriorShare.length>0||noShareNow.length>0)&&(
+        <div style={{fontSize:11,color:"#6b7280",marginTop:-4,marginBottom:8,lineHeight:1.5}}>
+          {noPriorShare.length>0&&<>{joinNames(noPriorShare.map(r=>r.label))} {noPriorShare.length===1?"has":"have"} no share change: no model in {topN} on any of the {priorQ&&priorQ.shareDays?priorQ.shareDays+" ":""}counted days of {d.priorComparable}. </>}
+          {noShareNow.length>0&&<>{joinNames(noShareNow.map(r=>r.label))} had no model in {topN} on any of the {latest.shareDays?latest.shareDays+" ":""}counted days of {d.latestComparable}, so {noShareNow.length===1?"it has":"they have"} no share to compare.</>}
         </div>
       )}
 
@@ -630,8 +682,7 @@ function PricingShareSignalBlock(){
         <span>·</span>
         <span><b style={{color:"#374151"}}>Scope:</b> directional ecosystem read-through, not a causal claim</span>
         <span>·</span>
-        <span><b style={{color:"#374151"}}>Omissions:</b> providers outside the OpenRouter top-N during the quarter are excluded, never imputed</span>
-        <span>·</span>
+        <ShareBasisNote basis={d.shareBasis} days={[latest,priorQ].filter(q=>q&&q.shareDays).map(q=>q.shareDays+" in "+q.quarter).join(", ")}/>
         <span><b style={{color:"#374151"}}>Sources:</b> pricepertoken provider pricing history + OpenRouter snapshots</span>
       </div>
     </div>

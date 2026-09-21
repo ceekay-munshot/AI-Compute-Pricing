@@ -99,11 +99,27 @@ function assertLooksLikeModels(models) {
     throw new Error('Rejected: ' + appish + ' rows are applications, not models — ' +
       'this is the Top Apps table (the 2026-08-18 regression)');
   }
-  const attributed = models.filter(m => m.provider && m.provider !== 'other').length;
-  if (attributed < models.length * 0.5) {
-    throw new Error('Rejected: only ' + attributed + ' of ' + models.length +
+  if (!isAttributedRanking(models)) {
+    throw new Error('Rejected: fewer than half of ' + models.length +
       ' rows have a real model provider — payload does not look like a model ranking');
   }
+}
+
+/**
+ * Whether at least half of a ranking's rows name a model maker.
+ *
+ * normaliseRow() files a row it cannot attribute under provider "other" (see
+ * inferProvider). The Top Apps table comes out almost all "other" ("Kilo
+ * Code", "Cline"), a model ranking almost none. One rule, two callers:
+ * assertLooksLikeModels() refuses to return a list that fails it, and the
+ * pricing/share read-through refuses to count a stored day that fails it —
+ * the history recorded the Apps table from 2026-08-18, before this refusal
+ * existed.
+ */
+export function isAttributedRanking(rows) {
+  if (!Array.isArray(rows) || !rows.length) return false;
+  const attributed = rows.filter(r => r && r.provider && r.provider !== 'other').length;
+  return attributed >= rows.length * 0.5;
 }
 
 const OR_URLS = {

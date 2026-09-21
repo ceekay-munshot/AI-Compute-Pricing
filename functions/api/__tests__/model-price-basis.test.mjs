@@ -556,10 +556,11 @@ test('the pricing/share read-through makes no price callout from a refused chang
     ],
     measureBreaks: { events: [], summary: null },
   };
-  // Shares: Q2 google 30 / anthropic 40 / openai 30; Q3 20 / 30 / 50.
+  // Shares: Q2 google 30 / anthropic 40 / openai 30; Q3 20 / 30 / 50. Ranked
+  // as the capture stores them: only a complete ranking is counted.
   const history = { success: true, snapshots: [
-    { date: '2026-05-01', or: [{ provider: 'google', tokRaw: 30 }, { provider: 'anthropic', tokRaw: 40 }, { provider: 'openai', tokRaw: 30 }] },
-    { date: '2026-08-01', or: [{ provider: 'google', tokRaw: 20 }, { provider: 'anthropic', tokRaw: 30 }, { provider: 'openai', tokRaw: 50 }] },
+    { date: '2026-05-01', or: [{ rank: 2, provider: 'google', tokRaw: 30 }, { rank: 1, provider: 'anthropic', tokRaw: 40 }, { rank: 3, provider: 'openai', tokRaw: 30 }] },
+    { date: '2026-08-01', or: [{ rank: 3, provider: 'google', tokRaw: 20 }, { rank: 2, provider: 'anthropic', tokRaw: 30 }, { rank: 1, provider: 'openai', tokRaw: 50 }] },
   ] };
 
   const realFetch = globalThis.fetch;

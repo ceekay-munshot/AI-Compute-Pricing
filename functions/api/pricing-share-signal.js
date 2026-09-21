@@ -9,13 +9,24 @@
  *      source of truth.
  *   2. /api/history?view=daily&range=365           — canonical KV daily
  *      snapshots, each with a top-N OpenRouter rankings array containing
- *      { provider, tokRaw } rows. This is the market-share source of truth.
+ *      { rank, provider, tokRaw } rows. This is the market-share source of
+ *      truth.
  *
- * For each day we compute provider token share = provider_tokRaw / total
- * tokRaw_in_snapshot. We then mean those daily shares within each calendar
- * quarter to get a provider-quarter share. Joining (by normalized provider
- * slug) with the pricing matrix yields per-(provider, quarter) rows with
- * priceQoq and shareQoq in the same period.
+ * Which days count (see uncountedReason): a day counts only if it is a real
+ * capture (not a gap-fill copy of a later one), its list is a MODEL ranking
+ * (at least half its rows name a model maker), and the list is complete
+ * (ranks run 1..N with none missing).
+ *
+ * Share of a day: provider tokens / total tokens over the top `depth` rows,
+ * where `depth` is the shortest counted list — so a 30-row day and a 10-row
+ * day both measure "share of the top 10", not two different things. On a
+ * counted day a provider with no row in that top `depth` has a share of
+ * exactly zero: the list is complete, so its absence is an observation.
+ *
+ * Share of a quarter: the mean of the daily shares over EVERY counted day of
+ * the quarter — one day-set for every provider. Joining (by normalized
+ * provider slug) with the pricing matrix yields per-(provider, quarter) rows
+ * with priceQoq and shareQoq in the same period.
  *
  * Classification rules (deliberately simple and transparent):
  *   Price regime:
@@ -33,14 +44,19 @@
  *
  * Honesty:
  *   - We only return a row for a provider in a quarter when BOTH its price
- *     and its share are observed. Providers outside the OR top-N on every
- *     captured day of a quarter are omitted — never imputed.
+ *     and its share are observed. A provider with no model in the top
+ *     `depth` on any counted day of a quarter gets no row and no share —
+ *     never an imputed one — and is named in that quarter's `notInTopN` when
+ *     it had a share the quarter before, so it does not vanish silently.
  *   - "latestComparable" is the most recent quarter that has both a real
- *     priceQoq AND a real shareQoq computed from real snapshots.
+ *     priceQoq AND a real shareQoq computed from counted days.
  *   - Upstream source-floor limitations (pricing: 2025-07-28; market share:
  *     whatever the KV index holds) propagate through without fabrication.
  *   - Directional ecosystem read-through. Not a causal claim.
  */
+
+import { isRealSnapshot } from './gpu-hardware-pricing-history.js';
+import { isAttributedRanking } from './openrouter.js';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -101,6 +117,38 @@ function priorQuarterKey(key) {
   if (!m) return null;
   const y = +m[1], q = +m[2];
   return q === 1 ? (y - 1) + '-Q4' : y + '-Q' + (q - 1);
+}
+
+/** A snapshot's ranking rows in rank order. A row with no rank sorts first as 0. */
+function rankedRows(snapshot) {
+  const arr = Array.isArray(snapshot && snapshot.or) ? snapshot.or : [];
+  return [...arr].sort((a, b) => (+a.rank || 0) - (+b.rank || 0));
+}
+
+/**
+ * Why a day's ranking is not counted toward market share, or null if it is.
+ * Every test reads what the capture itself recorded — never a list of names.
+ *
+ *   'backfill'          The capture job marks the copies it writes to fill a
+ *                       gap. Each is the later capture's list re-dated, not a
+ *                       second observation; the GPU history reader already
+ *                       leaves them out, by this same rule.
+ *   'notModelRanking'   Fewer than half the rows name a model maker. The
+ *                       capture files a row it cannot attribute under
+ *                       "other"; from 2026-08-18 to 09-15 it stored
+ *                       OpenRouter's Top Apps table ("Kilo Code", "Cline"),
+ *                       one app of which ("DeepSeek Harness") it attributed
+ *                       to deepseek. Same test the capture now applies before
+ *                       it stores a ranking at all.
+ *   'incompleteRanking' Ranks do not run 1..N. Only in a complete list does a
+ *                       provider's absence mean it was outside the top N,
+ *                       which is what lets an absent day count as zero share.
+ */
+function uncountedReason(snapshot, rows) {
+  if (!isRealSnapshot(snapshot)) return 'backfill';
+  if (!isAttributedRanking(rows)) return 'notModelRanking';
+  if (!rows.every((m, i) => +m.rank === i + 1)) return 'incompleteRanking';
+  return null;
 }
 
 function classifyPrice(qoq) {
@@ -168,43 +216,52 @@ export async function onRequestGet({ request }) {
     return jsonResp({ success: false, error: 'canonical history unavailable' }, 502);
   }
 
-  // ── Per-day per-provider share, then bucket by quarter ──
-  // dailyShares[date] = { total, byProvider: { slug: tokRaw } }
-  const shareByQuarter = new Map(); // quarterKey -> Map(slug -> [share1, share2, ...])
+  // ── Which days count (see uncountedReason) ──
+  const counted = []; // { q, rows } — rows in rank order
+  const excludedDays = { backfill: 0, notModelRanking: 0, incompleteRanking: 0 };
   for (const s of history.snapshots || []) {
-    const arr = Array.isArray(s.or) ? s.or : [];
-    if (!arr.length) continue;
+    const rows = rankedRows(s);
+    if (!rows.length) continue;
     const q = quarterOfDate(s.date);
     if (!q) continue;
-    const total = arr.reduce((acc, m) => acc + (+m.tokRaw || 0), 0);
+    const why = uncountedReason(s, rows);
+    if (why) { excludedDays[why]++; continue; }
+    counted.push({ q, rows });
+  }
+  // Every day is read to the same depth: the shortest counted list. A longer
+  // list's first `depth` rows are, by its own ranking, that day's top `depth`.
+  const depth = counted.length ? Math.min(...counted.map(c => c.rows.length)) : 0;
+
+  // ── Per-day per-provider share of the top `depth`, summed by quarter ──
+  const shareSums = new Map(); // quarterKey -> { days, sums: Map(slug -> summed daily share %) }
+  for (const { q, rows } of counted) {
+    const top = rows.slice(0, depth);
+    const total = top.reduce((acc, m) => acc + (+m.tokRaw || 0), 0);
     if (total <= 0) continue;
     // Sum tokRaw per provider in this snapshot (same provider can hold multiple models)
     const perProv = new Map();
-    for (const m of arr) {
+    for (const m of top) {
       const slug = normalizeProviderSlug(m.provider);
       if (!slug) continue;
       perProv.set(slug, (perProv.get(slug) || 0) + (+m.tokRaw || 0));
     }
-    let q2p = shareByQuarter.get(q);
-    if (!q2p) { q2p = new Map(); shareByQuarter.set(q, q2p); }
+    let bucket = shareSums.get(q);
+    if (!bucket) { bucket = { days: 0, sums: new Map() }; shareSums.set(q, bucket); }
+    bucket.days++;
     for (const [slug, tok] of perProv) {
-      const share = (tok / total) * 100; // percent
-      const list = q2p.get(slug) || [];
-      list.push(share);
-      q2p.set(slug, list);
+      bucket.sums.set(slug, (bucket.sums.get(slug) || 0) + (tok / total) * 100); // percent
     }
   }
 
-  // Compute avg share per (quarter, provider)
+  // Avg share per (quarter, provider) over EVERY counted day of the quarter:
+  // a day on which the provider is outside the top `depth` adds zero.
   const quarterlyShare = new Map(); // quarterKey -> Map(slug -> avgSharePct)
-  for (const [q, provMap] of shareByQuarter) {
+  const shareDays = new Map(); // quarterKey -> counted days
+  for (const [q, { days, sums }] of shareSums) {
     const avg = new Map();
-    for (const [slug, arr] of provMap) {
-      if (!arr.length) continue;
-      const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
-      avg.set(slug, mean);
-    }
+    for (const [slug, sum] of sums) avg.set(slug, sum / days);
     quarterlyShare.set(q, avg);
+    shareDays.set(q, days);
   }
 
   // ── Walk pricing matrix quarters — pair with share quarters ──
@@ -258,7 +315,9 @@ export async function onRequestGet({ request }) {
         priceQoqReason: priceRefused ? (c.qoqReason || null) : null,
         priceReg,
         shareAvg,
-        shareAvgLabel: shareAvg.toFixed(1) + '%',
+        // Two decimals under 1%: a provider in the top N on a few days of the
+        // quarter must not read as "0.0%".
+        shareAvgLabel: shareAvg.toFixed(shareAvg < 1 ? 2 : 1) + '%',
         sharePrev: (typeof sharePrev === 'number') ? sharePrev : null,
         shareQoqPP,
         shareQoqLabel: (typeof shareQoqPP === 'number') ? ((shareQoqPP >= 0 ? '+' : '') + shareQoqPP.toFixed(2) + 'pp') : '—',
@@ -268,8 +327,16 @@ export async function onRequestGet({ request }) {
         modelCount: c.modelCount || 0,
       });
     }
+    // Priced providers that had a share last quarter and no model in the top
+    // `depth` on any counted day of this one: no row, no share — but named,
+    // so they do not silently drop out of the read-through.
+    const notInTopN = (shareNow && sharePrior)
+      ? (q.cells || [])
+          .filter(c => typeof c.avg === 'number' && sharePrior.has(c.slug) && !shareNow.has(c.slug))
+          .map(c => ({ slug: c.slug, label: slugToLabel[c.slug] || c.slug }))
+      : [];
     if (rows.length) {
-      allQuarterRows.push({ quarter: q.quarter, partial: q.partial, rows });
+      allQuarterRows.push({ quarter: q.quarter, partial: q.partial, shareDays: shareDays.get(q.quarter) || 0, rows, notInTopN });
       if (!latestComparable && rows.some(r => typeof r.priceQoq === 'number' && typeof r.shareQoqPP === 'number')) {
         latestComparable = q.quarter;
       }
@@ -353,6 +420,9 @@ export async function onRequestGet({ request }) {
       priceCutPct: -2, priceUpPct: 2,
       shareGainPP: 0.3, shareLossPP: -0.3,
     },
+    // What a share is measured over, and the captured days left out of it.
+    // Each quarter carries its own counted-day total as `shareDays`.
+    shareBasis: { depth, countedDays: counted.length, excludedDays },
     // The matrix's account of any change in what the source reports, passed
     // through so the block can explain providers kept off the chart.
     measureBreaks: pricing.measureBreaks || null,
@@ -360,8 +430,10 @@ export async function onRequestGet({ request }) {
     sourceNote:
       'Directional ecosystem read-through · not a causal claim. ' +
       'Pricing QoQ: api.pricepertoken.com provider pricing history (equal-weighted, quarterly). ' +
-      'Market share: canonical HISTORY_KV snapshots of OpenRouter top-N by weekly tokens, averaged over observed days per quarter. ' +
-      'Providers outside the OR top-N during a quarter are omitted, never imputed. ' +
+      'Market share: each captured day\'s share of the top ' + depth + ' OpenRouter models by weekly tokens, ' +
+      'averaged over every counted day of the quarter; a provider outside the top ' + depth + ' on a day counts as zero for it. ' +
+      'Not counted: gap-fill copies of a later capture, and days whose stored list is not a complete model ranking. ' +
+      'A provider with no model in the top ' + depth + ' on any counted day of a quarter has no share for it, never an imputed one. ' +
       'Where the source changed how it reports a provider\'s prices between the two quarters, ' +
       'that provider\'s price change is not computed and it makes no price callout.',
   });

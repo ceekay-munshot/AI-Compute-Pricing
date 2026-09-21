@@ -120,7 +120,13 @@ function jsonResp(data, status = 200, cache = 'public, max-age=120, s-maxage=300
   });
 }
 
-function isRealSnapshot(snap) {
+/**
+ * A real capture, not a backfill copy or a synthetic seed — the
+ * classification described in this file's header. Exported so every reader of
+ * the daily history answers "does this day count?" with one rule; the
+ * pricing/share read-through applies it to its market-share days.
+ */
+export function isRealSnapshot(snap) {
   if (!snap) return false;
   if (snap.backfill === true) return false;
   const src = typeof snap.source === 'string' ? snap.source : '';
