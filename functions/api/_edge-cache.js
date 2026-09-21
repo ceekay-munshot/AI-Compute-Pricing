@@ -37,9 +37,15 @@
  * answering s-maxage=21600 from an entry stored before the TTL was cut to 3600.
  * Changing the key is the only way to abandon them.
  *
+ * The same goes for a change in what a cached payload's values MEAN, even
+ * when its shape is untouched. v5: model-pricing levels began resting on one
+ * measure per period and growth across the source's 2026-07-10 change began
+ * to be refused — a stored matrix still carrying the phantom "Google -19.5%"
+ * cut must not be replayed for the rest of its TTL.
+ *
  * Routine data changes do NOT need a bump — the TTLs bound those.
  */
-const CACHE_SCHEMA = 'v4';
+const CACHE_SCHEMA = 'v5';
 
 /**
  * Build the cache key.

@@ -280,6 +280,32 @@ is never hardcoded into the app.
 
 ---
 
+## The 2026-07-10 model-price change — also not a market move
+
+On 2026-07-10 pricepertoken's figure for 13 Google and 10 OpenAI models fell
+to **exactly half** on the same day (Gemini 2.5 Pro $1.25 -> $0.625 after a year
+flat; GPT-5 mini $0.25 -> $0.125). Two vendors do not reprice two dozen models
+by one identical factor on one day: the source changed which price it reports.
+The long header comment in `functions/api/_model-price-basis.js` has the full
+diagnosis, and every model-price read goes through that module.
+
+- The date is **detected from the rows**, not hard-coded: a day on which at
+  least 5 standard SKUs step by the same exact factor, one direction, and at
+  each provider counted those steps are at least 80% of that provider's own
+  price moves that day (so an unrelated provider repricing the same day cannot
+  hide it). A lone model's real cut (Gemini 3.6 Flash, 2026-08-14) does not
+  qualify.
+- A model is touched only by its OWN exact step across that date. GPT-5, GPT-4o,
+  every Gemma and all of Anthropic are untouched and compare normally. A model
+  first listed on or after the date at Google or OpenAI (the GPT-5.6 family,
+  Gemini 3.6 Flash) is placed on the new measure: nothing shows otherwise.
+- Each period averages ONE measure; QoQ / MoM / YoY across the change read
+  **measure changed**, and the pricing/share callouts cannot fire on them.
+- Prices after the change are shown exactly as reported (marked with a dagger), never
+  rescaled. `original_*` fields are not a fix: they never move.
+
+---
+
 ## The usage-weight gate — expect withheld cells
 
 `/api/openrouter-model-usage` currently reports `weeksStored: 0`. It banks the

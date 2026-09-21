@@ -25,6 +25,13 @@
  *     floor is 2025-Q3 (partial). Client asked for 2023+; we do not fake it.
  *   - YoY is only returned when a same-quarter one year earlier row exists
  *     with real data.
+ *   - The source can change WHAT it reports: on 2026-07-10 its figure for 13
+ *     Google and 10 OpenAI models fell to exactly half on one day. Every price
+ *     is read, and every quarter's measure decided, by _model-price-basis.js:
+ *     a quarter averages one measure only, and QoQ/YoY between quarters on
+ *     different measures are refused with a reason (qoqMeasureChanged /
+ *     qoqReason, yoyMeasureChanged / yoyReason) instead of being printed as a
+ *     price move.
  *
  * Query params:
  *   ?metric=input   (default) — pricing_prompt, scaled to per 1M tokens
@@ -52,6 +59,22 @@ import {
 } from './_usage-weights.js';
 import { fetchMarketShare } from './_openrouter-rankings.js';
 import { withEdgeCache } from './_edge-cache.js';
+import {
+  BASIS_ORIGIN,
+  readPrice,
+  rowDay,
+  isAltBillingSku,
+  buildBasisBook,
+  tallyFor,
+  addToTally,
+  resolveTally,
+  countsToward,
+  basisGrowth,
+  isMeasureChange,
+  measureChangeReason,
+  periodLabel,
+  describeMeasureBreaks,
+} from './_model-price-basis.js';
 
 const UPSTREAM_BASE = 'https://api.pricepertoken.com/api/provider-pricing-history/';
 // One hour, and it is the bound on how far behind pricepertoken this can fall.
@@ -209,29 +232,21 @@ async function fetchAllProviders(providers, batchSize = 4) {
 }
 
 /**
- * Build the matrix from a list of provider rowsets.
+ * Every provider-quarter's model-day level, on ONE measure.
  *
- * Default (weighting omitted): the average is equal-weighted across every
- * (model, day) observation in the quarter — i.e., one point per model per day
- * that the upstream recorded a price for. This mirrors how pricepertoken's own
- * chart aggregates the data and avoids collapsing-to-one-model bias when some
- * models have more dated observations than others.
+ * Returns slug -> quarter -> resolveTally() result ({ mean, n, basis, models,
+ * excludedN, ... }, mean in $/token). Computed once per request and read by
+ * both weightings — the model-day average in buildMatrix and the usage-weighted
+ * resolver — so the two always stand on the same measure in the same quarter.
  *
- * With `weighting` supplied, each model's mean price in the quarter is instead
- * weighted by the tokens it served, and cells that cannot clear the coverage
- * gate are withheld. The equal-weighted level is retained on every cell as
- * `equalAvg` so the two are always comparable side by side.
+ * A quarter holding observations from both sides of a change of measure takes
+ * the measure covering most of the touched models' observations and leaves the
+ * rest out, counted; untouched models always count. See _model-price-basis.js.
  */
-function buildMatrix(providerResults, metric, weighting) {
-  const priceField = metric === 'output' ? 'pricing_completion' : 'pricing_prompt';
-
-  // Collect the union of quarter keys across providers
-  const allQuarters = new Set();
-  const perProvider = new Map();
-
+function providerQuarterLevels(providerResults, metric, book) {
+  const out = new Map();
   for (const pr of providerResults) {
-    // quarter -> { sum, count, modelSet }
-    const buckets = new Map();
+    const tallies = new Map();                     // quarter -> tally
     for (const row of pr.rows) {
       // Alternate-billing SKUs are the same model sold on different terms —
       // ':batch' is ~50% off async, plus ':beta', ':thinking', ':free',
@@ -247,22 +262,41 @@ function buildMatrix(providerResults, metric, weighting) {
       // price cutter when Anthropic had in fact cut the least and Google the
       // most. No provider's list price changed on that date; the upstream
       // catalog just grew a column.
-      if (typeof row?.model === 'string' && row.model.includes(':')) continue;
-      const v = row?.[priceField];
+      if (isAltBillingSku(row?.model)) continue;
       // Strictly > 0: $0.00 rows are free/experimental SKUs (Google's
       // gemini-2.5-pro-exp-*, lyria-*) and drag a paid-lineup average down.
-      if (typeof v !== 'number' || !isFinite(v) || v <= 0) continue;
-      const dateStr = row?.date;
-      if (typeof dateStr !== 'string' || dateStr.length < 10) continue;
-      const q = quarterOf(dateStr);
-      allQuarters.add(q);
-      if (!buckets.has(q)) buckets.set(q, { sum: 0, count: 0, models: new Set() });
-      const b = buckets.get(q);
-      b.sum += v;
-      b.count += 1;
-      if (row.model) b.models.add(row.model);
+      const v = readPrice(row, metric);
+      if (v === null) continue;
+      const day = rowDay(row);
+      if (!day) continue;
+      addToTally(tallyFor(tallies, quarterOf(day)), book.basisOf(pr.slug, row.model, day), v, row.model || null);
     }
-    perProvider.set(pr.slug, buckets);
+    const levels = new Map();
+    for (const [q, t] of tallies) levels.set(q, resolveTally(t));
+    out.set(pr.slug, levels);
+  }
+  return out;
+}
+
+/**
+ * Build the matrix from each provider's quarter levels (providerQuarterLevels).
+ *
+ * Default (weighting omitted): the average is equal-weighted across every
+ * (model, day) observation in the quarter — i.e., one point per model per day
+ * that the upstream recorded a price for. This mirrors how pricepertoken's own
+ * chart aggregates the data and avoids collapsing-to-one-model bias when some
+ * models have more dated observations than others.
+ *
+ * With `weighting` supplied, each model's mean price in the quarter is instead
+ * weighted by the tokens it served, and cells that cannot clear the coverage
+ * gate are withheld. The equal-weighted level is retained on every cell as
+ * `equalAvg` so the two are always comparable side by side.
+ */
+function buildMatrix(levelsBySlug, weighting, events) {
+  // Collect the union of quarter keys across providers
+  const allQuarters = new Set();
+  for (const levels of levelsBySlug.values()) {
+    for (const q of levels.keys()) allQuarters.add(q);
   }
 
   // Sort quarters newest first
@@ -271,19 +305,25 @@ function buildMatrix(providerResults, metric, weighting) {
   // Build output rows (one row per quarter)
   const rows = quarters.map(q => {
     const cells = PROVIDERS.map(p => {
-      const b = perProvider.get(p.slug);
-      const stat = b && b.get(q);
-      if (!stat) {
+      const stat = levelsBySlug.get(p.slug)?.get(q);
+      if (!stat || stat.mean === null) {
         return { slug: p.slug, avg: null, avgLabel: '—', obsCount: 0, modelCount: 0 };
       }
       // Upstream values are $/token; scale to $/1M tokens
-      const equalAvg = (stat.sum / stat.count) * 1_000_000;
+      const equalAvg = stat.mean * 1_000_000;
       const cell = {
         slug: p.slug,
         avg: round3(equalAvg),
         avgLabel: formatPrice(equalAvg),
-        obsCount: stat.count,
+        obsCount: stat.n,
         modelCount: stat.models.size,
+        // The measure this cell stands on: 'origin', or the date of the
+        // source change it was reported after. The QoQ/YoY pass below reads
+        // it, and the matrix marks a cell reported after a change.
+        basis: stat.basis,
+        // Observations in the quarter from the other side of a change, left
+        // out rather than blended in. 0 almost everywhere.
+        basisExcludedObs: stat.excludedN,
       };
       if (!weighting) return cell;
 
@@ -398,19 +438,36 @@ function buildMatrix(providerResults, metric, weighting) {
 
   // Attach QoQ / YoY per cell (against same provider, adjacent periods).
   // Null-safe: if the comparison quarter is absent or has null avg, leave null.
+  //
+  // Whether two quarters can be compared at all is decided in ONE place,
+  // _model-price-basis.js: quarters on different measures are refused, and
+  // the cell carries the reason instead of the difference. At provider level
+  // the rule is "any", not "most": a quarter is on the changed measure if ANY
+  // model in it was touched by the change. One touched $1.25 model among
+  // cheap untouched ones carries most of an equal-weighted $/token mean, so
+  // there is no share of touched models below which the move stops being the
+  // artefact — Google's -19.5% for 2026-Q3 was 13 of its 29 models.
   const rowByQuarter = new Map(rows.map(r => [r.quarter, r]));
+  const level = (c) => (c && c.avg !== null ? { value: c.avg, basis: c.basis } : null);
   for (const row of rows) {
     row.cells.forEach((cell, idx) => {
-      const priorRow = rowByQuarter.get(priorQuarter(row.quarter));
-      const yearRow  = rowByQuarter.get(yearAgoQuarter(row.quarter));
-      const priorCell = priorRow?.cells?.[idx];
-      const yearCell  = yearRow?.cells?.[idx];
-      cell.qoq = (cell.avg !== null && priorCell?.avg && priorCell.avg > 0)
-        ? round3((cell.avg - priorCell.avg) / priorCell.avg) : null;
+      const pq = priorQuarter(row.quarter);
+      const yq = yearAgoQuarter(row.quarter);
+      const cur = level(cell);
+      const prior = level(rowByQuarter.get(pq)?.cells?.[idx]);
+      const year  = level(rowByQuarter.get(yq)?.cells?.[idx]);
+      cell.qoq = basisGrowth(cur, prior);
       cell.qoqLabel = formatPct(cell.qoq);
-      cell.yoy = (cell.avg !== null && yearCell?.avg && yearCell.avg > 0)
-        ? round3((cell.avg - yearCell.avg) / yearCell.avg) : null;
+      cell.yoy = basisGrowth(cur, year);
       cell.yoyLabel = formatPct(cell.yoy);
+      if (isMeasureChange(cur, prior)) {
+        cell.qoqMeasureChanged = true;
+        cell.qoqReason = measureChangeReason(cur, prior, periodLabel(pq), events);
+      }
+      if (isMeasureChange(cur, year)) {
+        cell.yoyMeasureChanged = true;
+        cell.yoyReason = measureChangeReason(cur, year, periodLabel(yq), events);
+      }
     });
   }
 
@@ -463,41 +520,57 @@ async function fetchSameOrigin(request, path) {
  * A window with no priced day returns null, so those tokens are dropped and
  * count against coverage rather than borrowing a price from another week.
  */
-function makeModelResolver(providerResults, priceField) {
+function makeModelResolver(providerResults, metric, book, levelsBySlug) {
   const catalog = new Map();                       // slug -> model -> (day -> price)
   for (const pr of providerResults) {
     const byModel = new Map();
     for (const row of pr.rows) {
-      if (typeof row?.model !== 'string' || row.model.includes(':')) continue;
-      const v = row?.[priceField];
-      if (typeof v !== 'number' || !isFinite(v) || v <= 0) continue;
-      const date = row?.date;
-      if (typeof date !== 'string' || date.length < 10) continue;
+      if (typeof row?.model !== 'string' || isAltBillingSku(row.model)) continue;
+      const v = readPrice(row, metric);
+      if (v === null) continue;
+      const day = rowDay(row);
+      if (!day) continue;
       if (!byModel.has(row.model)) byModel.set(row.model, new Map());
-      byModel.get(row.model).set(date.slice(0, 10), v);
+      byModel.get(row.model).set(day, v);
     }
     catalog.set(pr.slug, byModel);
   }
 
-  /** Mean of a model's daily prices across [from, to]; null if none priced. */
-  const meanOver = (days, from, to) => {
+  /**
+   * Mean of a model's daily prices across [from, to], counting only days on
+   * the quarter's own measure — the same days the model-day level for that
+   * provider-quarter rests on — so a week straddling a change of measure is
+   * charged at one measure, never a blend. { price, priced }: price is null
+   * when no day counts; priced says whether the window had any price at all.
+   */
+  const meanOver = (slug, model, days, from, to, basis) => {
     let sum = 0;
     let n = 0;
+    let priced = false;
     for (let t = Date.parse(from + 'T00:00:00Z'); t <= Date.parse(to + 'T00:00:00Z'); t += 86400000) {
-      const v = days.get(new Date(t).toISOString().slice(0, 10));
-      if (typeof v === 'number') { sum += v; n += 1; }
+      const day = new Date(t).toISOString().slice(0, 10);
+      const v = days.get(day);
+      if (typeof v !== 'number') continue;
+      priced = true;
+      if (!countsToward(book.basisOf(slug, model, day), basis)) continue;
+      sum += v; n += 1;
     }
-    return n ? sum / n : null;
+    return { price: n ? sum / n : null, priced };
   };
 
-  return (pptSlug, orModel, _quarter, from, to) => {
+  return (pptSlug, orModel, quarter, from, to) => {
     const byModel = catalog.get(pptSlug);
     if (!byModel) return null;
+    const basis = levelsBySlug.get(pptSlug)?.get(quarter)?.basis || BASIS_ORIGIN;
     for (const candidate of priceModelCandidates(orModel)) {
       const days = byModel.get(candidate);
       if (!days) continue;
-      const price = meanOver(days, from, to);
-      if (price !== null) return { model: candidate, price };
+      const m = meanOver(pptSlug, candidate, days, from, to, basis);
+      if (m.price !== null) return { model: candidate, price: m.price };
+      // Priced in this window, but only on the other side of a change: the
+      // tokens are dropped (lowering coverage) rather than re-matched to a
+      // different candidate name.
+      if (m.priced) return null;
     }
     return null;
   };
@@ -627,6 +700,12 @@ async function buildProviderMatrix(request, metric, weight) {
     }, 502, { 'Cache-Control': 'no-store' });
   }
 
+  // Which measure every observation sits on, decided once from this
+  // request's own rows (see _model-price-basis.js), and every
+  // provider-quarter's level on one measure. Both weightings read these.
+  const book = buildBasisBook(results, metric);
+  const levels = providerQuarterLevels(results, metric, book);
+
   // Usage weighting needs two separate captures: per-model tokens for the
   // weights, and per-provider totals for the coverage denominator. If either
   // is missing the request does NOT silently fall back to equal weighting —
@@ -655,9 +734,8 @@ async function buildProviderMatrix(request, metric, weight) {
     const { series: modelSeries, richWeeks } =
       overlayRichModelWeeks(chartSeries, richSeries, metric);
 
-    const priceField = metric === 'output' ? 'pricing_completion' : 'pricing_prompt';
     const built = buildUsageWeights(
-      modelSeries, providerSeries, makeModelResolver(results, priceField),
+      modelSeries, providerSeries, makeModelResolver(results, metric, book, levels),
     );
     // Both series are required. Without the model series there are no weights;
     // without the provider series there is no denominator to certify them
@@ -699,7 +777,7 @@ async function buildProviderMatrix(request, metric, weight) {
     };
   }
 
-  const { quarters } = buildMatrix(results, metric, weighting);
+  const { quarters } = buildMatrix(levels, weighting, book.events);
   const currentQ = currentQuarterKey();
   quarters.forEach(q => { q.partial = q.quarter === currentQ; });
 
@@ -733,12 +811,23 @@ async function buildProviderMatrix(request, metric, weight) {
         'mean price in the quarter is weighted by the tokens it served, so the ' +
         'cell reads as what was actually paid rather than a list-price mean. ' +
         'Cells whose weights do not cover enough of a provider\'s volume are ' +
-        'withheld with a stated reason, never estimated.'
+        'withheld with a stated reason, never estimated. Where the source changed ' +
+        'what it reports, each quarter averages one measure only and QoQ/YoY across ' +
+        'the change are not computed.'
       : 'Upstream is pricepertoken.com\'s own historical pricing API. ' +
         'Per-provider daily model prices are averaged equal-weighted across ' +
         'every (model, day) observation in each calendar quarter. No synthetic ' +
-        'backfill — pre-upstream quarters simply do not appear.',
+        'backfill — pre-upstream quarters simply do not appear. Where the source ' +
+        'changed what it reports, each quarter averages one measure only and ' +
+        'QoQ/YoY across the change are not computed.',
     earliestDateObserved: earliestDate ? earliestDate.slice(0, 10) : null,
+    // Every day on which the source changed what it reports, found from this
+    // response's own rows, and the plain-words caption the matrix shows for
+    // it ({ headline, detail }, or null when there is none).
+    measureBreaks: {
+      events: book.events,
+      summary: describeMeasureBreaks([book.events], slug => PROVIDERS.find(p => p.slug === slug)?.label || slug),
+    },
     providers: PROVIDERS,
     quarters,
     providerErrors: results.filter(r => r.error).map(r => ({ slug: r.slug, error: r.error, attempts: r.attempts })),

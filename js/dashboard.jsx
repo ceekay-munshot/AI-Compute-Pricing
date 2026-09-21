@@ -458,6 +458,12 @@ function PricingShareSignalBlock(){
      renders tall enough to visually balance the signal table alongside it. */
   const W=520,H=360,pL=40,pR=18,pT=22,pB=32;
   const rows=latest.rows.filter(r=>typeof r.priceQoq==="number"&&typeof r.shareQoqPP==="number");
+  // Providers whose price change was refused because the source changed what
+  // it reports between the quarters. They stay in the table — their share move
+  // is real — but have no x position, so they are kept off the chart.
+  const refusedRows=latest.rows.filter(r=>r.priceMeasureChanged&&typeof r.shareQoqPP==="number");
+  const tableRows=[...rows,...refusedRows];
+  const refusedNames=(n=>n.length<3?n.join(" and "):n.slice(0,-1).join(", ")+" and "+n[n.length-1])(refusedRows.map(r=>r.label));
   let xMax=Math.max(5,...rows.map(r=>Math.abs(r.priceQoq*100)))*1.15;
   let yMax=Math.max(1,...rows.map(r=>Math.abs(r.shareQoqPP)))*1.3;
   const sx=(v)=>pL+((v+xMax)/(2*xMax))*(W-pL-pR);
@@ -508,6 +514,12 @@ function PricingShareSignalBlock(){
         {latest.partial&&<span style={{marginLeft:5,fontSize:9,background:"#ecfeff",color:"#0e7490",padding:"1px 5px",borderRadius:3,fontWeight:600}}>QTD</span>}
         <span style={{color:"#9ca3af"}}> vs {d.priorComparable} · {rows.length} providers observed in both dimensions</span>
       </div>
+      {refusedRows.length>0&&(
+        <div style={{fontSize:11,color:"#92400e",marginTop:-4,marginBottom:8,lineHeight:1.5}}
+             title={d.measureBreaks?.summary?d.measureBreaks.summary.headline+" "+d.measureBreaks.summary.detail:undefined}>
+          {refusedNames} {refusedRows.length===1?"is":"are"} left off the chart: the source changed how it reports {refusedRows.length===1?"its":"their"} prices between these quarters, so {refusedRows.length===1?"its":"their"} price change is not computed.
+        </div>
+      )}
 
       {/* Callout chips */}
       {d.callouts&&d.callouts.length>0&&(
@@ -586,14 +598,15 @@ function PricingShareSignalBlock(){
               </tr>
             </thead>
             <tbody>
-              {rows.map(r=>(
+              {tableRows.map(r=>(
                 <tr key={r.slug}>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontWeight:600,color:"#111827",whiteSpace:"nowrap"}}>
                     <span style={{display:"inline-block",width:8,height:8,borderRadius:"50%",background:regimeColor(r.priceReg,r.shareReg),marginRight:6,verticalAlign:"middle"}}/>
                     {r.label}
                   </td>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",color:"#111827"}}>{r.avgLabel}</td>
-                  <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",fontWeight:600,color:r.priceQoq>0?"#dc2626":r.priceQoq<0?"#059669":"#6b7280"}}>{r.priceQoqLabel}</td>
+                  <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",fontWeight:600,color:r.priceQoq>0?"#dc2626":r.priceQoq<0?"#059669":"#6b7280"}}
+                      title={r.priceMeasureChanged?(r.priceQoqReason||undefined):undefined}>{r.priceMeasureChanged?measureChangedTag():r.priceQoqLabel}</td>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",fontWeight:600,color:r.shareQoqPP>0?"#059669":r.shareQoqPP<0?"#dc2626":"#6b7280"}}>{r.shareQoqLabel}</td>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontSize:11,color:"#374151",lineHeight:1.35}}>
                     <div style={{fontWeight:600,color:"#111827"}}>{r.regimeLabel}</div>
@@ -793,6 +806,8 @@ function ModelPricingHistoryBlock(){
          forty cells were filled — the two disagreed on screen, and the chart
          was the one that was wrong. The matrix below carries the same series
          with its coverage and basis per cell. */}
+      {state.phase==="ready"&&<MeasureBreakCaption mb={state.data?.measureBreaks}/>}
+
       {/* ── Matrix section header (kept minimal — methodology lives at bottom) ── */}
       {state.phase==="ready"&&state.data?.quarters?.length>0&&(
         <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4,marginTop:4}}>
@@ -839,8 +854,16 @@ function ModelPricingHistoryBlock(){
 // weighted-to-list ratio (or peers', which is weaker still).
                     const showEst=weighted&&c.avg===null&&c.estimateAvgLabel&&view==="avg";
                     const GATE_SHORT={"series-unavailable":"weights unavailable","no-usage":"no paid OR volume","too-few-models":(c.weightedModelCount||1)+" model only","coverage-unknown":"coverage not measurable","low-coverage":"coverage "+(c.coverageLabel||"low"),"single-model-dominated":"1 model is "+(c.topWeightShareLabel||"most")};
-                    if(view==="qoq"){ main=c.qoqLabel||"—"; color=cellColor(c.qoq); sub=c.avgLabel; }
-                    else if(view==="yoy"){ main=c.yoyLabel||"—"; color=cellColor(c.yoy); sub=c.avgLabel; }
+                    // A change refused because the source changed what it reports
+                    // between the two quarters is named, with the reason on hover.
+                    const refusedWhy=view==="qoq"
+                      ?(c.qoqMeasureChanged?(c.qoqReason||"The source changed what it reports between these quarters."):null)
+                      :view==="yoy"
+                        ?(c.yoyMeasureChanged?(c.yoyReason||"The source changed what it reports between these quarters."):null)
+                        :null;
+                    const afterChange=!!c.basis&&c.basis!=="origin";
+                    if(view==="qoq"){ main=refusedWhy?measureChangedTag():(c.qoqLabel||"—"); color=cellColor(c.qoq); sub=c.avgLabel; }
+                    else if(view==="yoy"){ main=refusedWhy?measureChangedTag():(c.yoyLabel||"—"); color=cellColor(c.yoy); sub=c.avgLabel; }
                     else {
                       main=c.avgLabel;
                       sub=weighted
@@ -890,8 +913,8 @@ function ModelPricingHistoryBlock(){
                       :(c.avgLabel||"—")+" avg · "+(c.modelCount||0)+" models in this quarter · "+(c.obsCount||0)+" daily observations"+(c.qoqLabel?" · QoQ "+c.qoqLabel:"")+(c.yoyLabel?" · YoY "+c.yoyLabel:"");
                     return(
                       <td key={c.slug} style={{padding:"10px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",textAlign:"right",fontWeight:600,color,whiteSpace:"nowrap"}}
-                          title={tip}>
-                        <div>{main}</div>
+                          title={refusedWhy||[tip,afterChangeTitle(afterChange?c.basis:null,c.basisExcludedObs)].filter(Boolean).join(" · ")}>
+                        <div>{main}{view==="avg"&&afterChange&&main!=="—"&&afterChangeMark()}</div>
                         <div style={{fontSize:9,color:withheld&&!showEst?"#d1d5db":"#9ca3af",fontWeight:400,marginTop:1}}>{sub}</div>
                       </td>
                     );
@@ -999,9 +1022,10 @@ function ModelPricingMatrixTable(){
   const[state,setState]=useState({phase:"loading",data:null,error:null});
   const[diagOpen,setDiagOpen]=useState(false);
   // Granularity: quarter is the default finance view; month exposes the
-  // step changes a quarterly average blurs (Google's July-2026 50% cuts
-  // read as a soft -44% quarter but a clean 2x step month-over-month)
-  // and is currently the only granularity where YoY is computable at all.
+  // step changes a quarterly average blurs, and is currently the only
+  // granularity where YoY is computable at all. (The 2026-07-10 step in the
+  // Google and OpenAI rows is not one of those: it is the source changing
+  // what it reports, and both granularities refuse growth across it.)
   const[gran,setGran]=useState("quarter");
   const {dataTick}=useContext(DataRefreshContext);
   const loaded=useRef(false); // true once real figures are on screen
@@ -1130,6 +1154,11 @@ function ModelPricingMatrixTable(){
     return <span style={{color}}>{str}</span>;
   };
 
+  // Where the source changed what it reports, drawn as the same dashed rule
+  // the GPU matrix uses, through both tables.
+  const boundaryIdx=modelBasisBoundaryIndex([...reps,...frontierRef],[G.price.input,G.price.output],periods);
+  const bStyle=i=>finBoundaryStyle(i===boundaryIdx);
+
   const STICKY_BG="#f3f4f6";
   const STICKY_SHADOW="2px 0 0 #e5e7eb, 6px 0 6px -4px rgba(17,24,39,0.08)";
   const FIRST_COL_W=260;
@@ -1143,8 +1172,8 @@ function ModelPricingMatrixTable(){
   const tdFirst={...stickyFirstBase,textAlign:"left",padding:"6px 10px 6px 18px",fontSize:11,whiteSpace:"nowrap",zIndex:2};
   const sectionTh={...stickySectionBase,textAlign:"left",padding:"10px 10px 4px",fontSize:11,color:"#111827",fontWeight:700,textDecoration:"underline",textUnderlineOffset:"3px",zIndex:1};
 
-  const periodHeaderCells=(bg)=>periods.map(p=>(
-    <th key={p.id} style={bg?{...thMain,background:bg}:thMain}>
+  const periodHeaderCells=(bg)=>periods.map((p,i)=>(
+    <th key={p.id} style={{...thMain,...(bg?{background:bg}:null),...bStyle(i)}}>
       {periodIdToLabel(p.id,gran)}
       {p.partial&&<span style={{marginLeft:3,fontSize:8,color:"#b45309",fontWeight:500}}>{G.partialBadge}</span>}
     </th>
@@ -1156,7 +1185,7 @@ function ModelPricingMatrixTable(){
         {label}
         {note&&<div style={{fontWeight:400,fontSize:9,color:"#9ca3af",textDecoration:"none",marginTop:1,whiteSpace:"normal",lineHeight:1.35}}>{note}</div>}
       </td>
-      {periods.map(p=>(<td key={p.id} style={{padding:"10px 10px 4px",background:"#f3f4f6",minWidth:COL_W}}/>))}
+      {periods.map((p,i)=>(<td key={p.id} style={{padding:"10px 10px 4px",background:"#f3f4f6",minWidth:COL_W,...bStyle(i)}}/>))}
     </tr>
   );
   const renderModelLabel=rep=>{
@@ -1175,18 +1204,26 @@ function ModelPricingMatrixTable(){
   const renderPriceRow=(rep,metricKey)=>(
     <tr key={metricKey+"-"+rep.key}>
       {renderModelLabel(rep)}
-      {periods.map(p=>{
+      {periods.map((p,i)=>{
         const val=rep[metricKey]?.[p.id];
-        return(<td key={p.id} style={tdMain}>{fmtPrice(val)}</td>);
+        const basis=rep.priceBasis?.[metricKey]?.[p.id];
+        return(
+          <td key={p.id} style={{...tdMain,...bStyle(i)}} title={afterChangeTitle(basis,rep.basisExcludedObs?.[metricKey]?.[p.id])}>
+            {fmtPrice(val)}{basis&&val!=null&&afterChangeMark()}
+          </td>
+        );
       })}
     </tr>
   );
+  // A refused change is named, with its reason on hover — never a bare dash,
+  // which would read as "no data".
   const renderChangeRow=(rep,key)=>(
     <tr key={key+"-"+rep.key}>
       {renderModelLabel(rep)}
-      {periods.map(p=>{
+      {periods.map((p,i)=>{
         const val=rep[key]?.[p.id];
-        return(<td key={p.id} style={tdDim}>{fmtChange(val)}</td>);
+        const why=val==null?rep.measureChanged?.[key]?.[p.id]:null;
+        return(<td key={p.id} style={{...tdDim,...bStyle(i)}} title={why||undefined}>{why?measureChangedTag():fmtChange(val)}</td>);
       })}
     </tr>
   );
@@ -1195,6 +1232,7 @@ function ModelPricingMatrixTable(){
   return(
     <div style={{marginBottom:16}}>
       {header}
+      <MeasureBreakCaption mb={data.measureBreaks}/>
       <div style={{border:"0.5px solid #e5e7eb",borderRadius:8,overflow:"hidden",background:"#f9fafb"}}>
         <div style={{overflowX:"auto"}}>
           <table style={{width:"100%",borderCollapse:"separate",borderSpacing:0,background:"#f3f4f6",minWidth:FIRST_COL_W+COL_W*periods.length}}>
@@ -1290,29 +1328,38 @@ function ModelPricingMatrixTable(){
                     <Fragment key={"fsec-"+section.label}>
                       <tr>
                         <td style={{...sectionTh,background:"#fafafa"}}>{section.label}</td>
-                        {periods.map(p=>(<td key={p.id} style={{padding:"10px 10px 4px",background:"#fafafa",minWidth:COL_W}}/>))}
+                        {periods.map((p,i)=>(<td key={p.id} style={{padding:"10px 10px 4px",background:"#fafafa",minWidth:COL_W,...bStyle(i)}}/>))}
                       </tr>
                       {frontierRef.map(row=>(
                         <tr key={"ref-"+section.label+"-"+row.providerSlug}>
                           <td style={{...tdFirst,background:"#fafafa"}}>
                             <div style={{lineHeight:1.25,fontWeight:600,color:"#111827"}}>{row.providerLabel}</div>
                           </td>
-                          {periods.map(p=>{
+                          {periods.map((p,i)=>{
                             const cell=row[G.frontierCells]?.[p.id];
                             if(section.kind==="label"){
                               const variantsTitle=cell?.matchedVariants?.length
                                 ? cell.matchedVariants.length+" upstream variant"+(cell.matchedVariants.length===1?"":"s")+" matched: "+cell.matchedVariants.join(", ")
                                 : undefined;
                               return(
-                                <td key={p.id} title={variantsTitle} style={{textAlign:"right",padding:"6px 10px",fontSize:11,color:cell?"#374151":"#d1d5db",fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",whiteSpace:"nowrap",minWidth:COL_W}}>
+                                <td key={p.id} title={variantsTitle} style={{textAlign:"right",padding:"6px 10px",fontSize:11,color:cell?"#374151":"#d1d5db",fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace",whiteSpace:"nowrap",minWidth:COL_W,...bStyle(i)}}>
                                   {cell?cell.display:"—"}
                                 </td>
                               );
                             }
                             const val=row[section.key]?.[p.id];
+                            if(section.kind==="price"){
+                              const basis=row.priceBasis?.[section.key]?.[p.id];
+                              return(
+                                <td key={p.id} style={{...tdMain,...bStyle(i)}} title={afterChangeTitle(basis)}>
+                                  {fmtPrice(val)}{basis&&val!=null&&afterChangeMark()}
+                                </td>
+                              );
+                            }
+                            const why=val==null?row.measureChanged?.[section.key]?.[p.id]:null;
                             return(
-                              <td key={p.id} style={section.kind==="price"?tdMain:tdDim}>
-                                {section.kind==="price"?fmtPrice(val):fmtChange(val)}
+                              <td key={p.id} style={{...tdDim,...bStyle(i)}} title={why||undefined}>
+                                {why?measureChangedTag():fmtChange(val)}
                               </td>
                             );
                           })}
@@ -1329,6 +1376,7 @@ function ModelPricingMatrixTable(){
 
       <div style={{fontSize:10,color:"#9ca3af",lineHeight:1.5,marginTop:6}}>
         <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> Prices use pricepertoken historical model-level rows, averaged by {G.bucketWord} and shown as $/1M tokens. {G.chgLabel}/YoY compare only valid full historical periods; {G.partialBadge} growth is suppressed. Fixed representative models keep growth math comparable; the Frontier Reference shows how the latest frontier label — and its price — change by period. Alternate-billing SKUs (<code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:batch</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:beta</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:thinking</code>) and sibling product lines (GPT-5 Pro vs GPT-5, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>-customtools</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>-fast</code>) are excluded from every average — each would otherwise register as a price move when only the upstream catalog changed. Firecrawl is used only as an advisory model-discovery signal, never for pricing math.
+        {data.measureBreaks?.summary&&<> Where the source changed what it reports mid-history (the dashed rule), each period averages one measure only; {G.chgLabel}/YoY across the change read <span style={{color:"#b45309",fontWeight:600}}>measure changed</span> rather than a percentage, and a price reported after it carries a <sup style={{color:"#b45309",fontWeight:700}}>&dagger;</sup>.</>}
       </div>
     </div>
   );
@@ -2065,6 +2113,64 @@ const FIN_BOUNDARY_BORDER="1.5px dashed #b45309";
 function finBoundaryStyle(isBoundary){
   return isBoundary?{borderLeft:FIN_BOUNDARY_BORDER}:null;
 }
+
+// The one rendering of a refused comparison, shared by every growth cell on
+// the page — GPU and model pricing alike. A refused cell must never look like
+// an empty one: "no data" and "these two numbers measure different things"
+// mean opposite things to a reader, so it is named, in the boundary's amber.
+// The reason goes on the cell's title, where the caller has it.
+function measureChangedTag(){
+  return <span style={{color:"#b45309",fontSize:9,fontWeight:600,whiteSpace:"nowrap"}}>measure&nbsp;changed</span>;
+}
+
+// Marks a model price the source reported after it changed what it reports.
+// Same size and weight as the thin-coverage marker, in the boundary's amber.
+function afterChangeMark(){
+  return <sup style={{color:"#b45309",fontSize:8,fontWeight:700,marginLeft:1}}>&dagger;</sup>;
+}
+
+// Tooltip for a model price cell. basis is the date of the change it was
+// reported after (absent on the original measure); left counts observations
+// from the other side of the change that the average leaves out.
+function afterChangeTitle(basis,left){
+  const parts=[];
+  if(basis)parts.push("As the source reports it after its "+basis+" change — not comparable with figures from before that date.");
+  if(left)parts.push(left+" daily observation"+(left===1?"":"s")+" from the other side of the change "+(left===1?"is":"are")+" left out, so this average rests on one measure.");
+  return parts.length?parts.join(" "):undefined;
+}
+
+// The caption above a model-pricing table when the source changed what it
+// reports inside the history. Same neutral amber note as the GPU matrix's
+// basis caption — the data is right, it changed units — carrying the
+// server's plain-words account of what changed and when.
+function MeasureBreakCaption({mb}){
+  const s=mb?.summary;
+  if(!s)return null;
+  return(
+    <div style={{background:"#fffbeb",border:"0.5px solid #fde68a",borderRadius:6,padding:"8px 11px",marginBottom:8,fontSize:11,color:"#92400e",lineHeight:1.55}}>
+      <b style={{fontWeight:700}}>{s.headline}</b>{" "}{s.detail}{" "}
+      A <sup style={{fontWeight:700}}>&dagger;</sup> marks a price reported after the change.
+    </div>
+  );
+}
+
+// First period column whose rows stand on a different measure from the
+// column before — where the dashed rule is drawn. The model-pricing twin of
+// finBasisBoundaryIndex, for rows carrying a sparse priceBasis map (absent =
+// the original measure). Found from the data on screen, never from a date.
+function modelBasisBoundaryIndex(rows,keys,periods){
+  let prev=null;
+  for(let i=0;i<periods.length;i++){
+    let b="origin";
+    for(const r of rows)for(const k of keys){
+      const x=r?.priceBasis?.[k]?.[periods[i].id];
+      if(x&&(b==="origin"||x>b))b=x;
+    }
+    if(prev!==null&&b!==prev)return i;
+    prev=b;
+  }
+  return -1;
+}
 function finIsPartial(rec,partialKey){
   if(!rec)return false;
   return !!rec[partialKey];
@@ -2666,7 +2772,7 @@ function renderFinGrowthRows(rows,growth,periods,dim,series,partialKey,boundaryI
               {basisBreak
                 // Named rather than left as an em-dash: this is the cell the
                 // customer's eye lands on when asking "why did it jump?".
-                ? <span style={{color:"#b45309",fontSize:9,fontWeight:600,whiteSpace:"nowrap"}}>measure&nbsp;changed</span>
+                ? measureChangedTag()
                 : <>{fmtGrowth(v)}{thin&&<sup style={{color:"#b45309",fontSize:8,fontWeight:700,marginLeft:1}}>&deg;</sup>}</>}
             </td>
           );

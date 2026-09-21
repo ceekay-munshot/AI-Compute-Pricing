@@ -22,6 +22,10 @@
  *     priceQoq <= -0.02  → "cut"
  *     |priceQoq| <  0.02 → "hold"
  *     priceQoq >=  0.02  → "up"
+ *     refused            → "measure_changed" — the pricing matrix declined to
+ *                          compare the quarters because the source changed
+ *                          what it reports between them. No price read is
+ *                          made, and no price callout can name the provider.
  *   Share regime (absolute percentage-point delta):
  *     shareQoq >=  0.3 pp → "gain"
  *     |shareQoq| < 0.3 pp → "flat"
@@ -112,6 +116,14 @@ function classifyShare(deltaPP) {
   if (deltaPP <= -0.3) return 'loss';
   return 'flat';
 }
+
+// A provider whose price change the matrix refused because the source changed
+// what it reports between the two quarters. Deliberately outside the 3x3
+// table: no price regime applies, so no read-through is claimed.
+const MEASURE_CHANGED_REGIME = {
+  label: 'Price measure changed',
+  note: 'The source changed how it reports this provider\'s prices between the two quarters, so the price change is not computed and no price read is made.',
+};
 
 /** Human-readable regime label + short interpretation. */
 function regimeFor(priceReg, shareReg) {
@@ -215,7 +227,10 @@ export async function onRequestGet({ request }) {
       const slug = c.slug;
       if (typeof c.avg !== 'number') continue;
       const priorCell = (priorQuarter && priorQuarter.cells.find(x => x.slug === slug)) || null;
-      const priceQoq = (typeof c.qoq === 'number') ? c.qoq : null;
+      // Refused by the matrix (see _model-price-basis.js). Never read as a
+      // number, even if one were present.
+      const priceRefused = c.qoqMeasureChanged === true;
+      const priceQoq = (!priceRefused && typeof c.qoq === 'number') ? c.qoq : null;
 
       const shareAvg = shareNow && shareNow.get(slug);
       const sharePrev = sharePrior && sharePrior.get(slug);
@@ -227,9 +242,9 @@ export async function onRequestGet({ request }) {
       // quarter) are skipped — being explicit about what we don't know.
       if (typeof shareAvg !== 'number') continue;
 
-      const priceReg = classifyPrice(priceQoq);
+      const priceReg = priceRefused ? 'measure_changed' : classifyPrice(priceQoq);
       const shareReg = classifyShare(shareQoqPP);
-      const regime   = regimeFor(priceReg, shareReg);
+      const regime   = priceRefused ? MEASURE_CHANGED_REGIME : regimeFor(priceReg, shareReg);
 
       rows.push({
         slug,
@@ -237,7 +252,10 @@ export async function onRequestGet({ request }) {
         avg: c.avg,
         avgLabel: c.avgLabel,
         priceQoq,
-        priceQoqLabel: (typeof priceQoq === 'number') ? ((priceQoq >= 0 ? '+' : '') + (priceQoq * 100).toFixed(1) + '%') : '—',
+        priceQoqLabel: priceRefused ? 'measure changed'
+          : (typeof priceQoq === 'number') ? ((priceQoq >= 0 ? '+' : '') + (priceQoq * 100).toFixed(1) + '%') : '—',
+        priceMeasureChanged: priceRefused,
+        priceQoqReason: priceRefused ? (c.qoqReason || null) : null,
         priceReg,
         shareAvg,
         shareAvgLabel: shareAvg.toFixed(1) + '%',
@@ -262,7 +280,17 @@ export async function onRequestGet({ request }) {
   let callouts = [];
   const latestObj = allQuarterRows.find(x => x.quarter === latestComparable);
   if (latestObj) {
-    const r = latestObj.rows.filter(x => typeof x.priceQoq === 'number' && typeof x.shareQoqPP === 'number');
+    // Every PRICE callout reads only rows whose price change was actually
+    // computed. A refused change is not a zero and not a cut — and without
+    // this, "Strongest pricing power" (which only asks "not a cut") would
+    // crown a provider whose price move is unknown.
+    const r = latestObj.rows.filter(x =>
+      !x.priceMeasureChanged && typeof x.priceQoq === 'number' && typeof x.shareQoqPP === 'number');
+    // The share callout needs only a share change. A provider whose price
+    // change was refused still gained or lost share, and its detail says the
+    // price change is not computed instead of quoting one.
+    const shareRows = latestObj.rows.filter(x =>
+      typeof x.shareQoqPP === 'number' && (typeof x.priceQoq === 'number' || x.priceMeasureChanged));
 
     const by = (fn) => [...r].sort(fn);
 
@@ -274,7 +302,7 @@ export async function onRequestGet({ request }) {
       detail: biggestCut.priceQoqLabel + ' input · share ' + biggestCut.shareQoqLabel,
     });
 
-    const strongestGainer = by((a,b) => b.shareQoqPP - a.shareQoqPP)[0];
+    const strongestGainer = [...shareRows].sort((a,b) => b.shareQoqPP - a.shareQoqPP)[0];
     if (strongestGainer && strongestGainer.shareQoqPP > 0) callouts.push({
       kind: 'strongest_share_gain',
       title: 'Strongest share gainer',
@@ -325,12 +353,17 @@ export async function onRequestGet({ request }) {
       priceCutPct: -2, priceUpPct: 2,
       shareGainPP: 0.3, shareLossPP: -0.3,
     },
+    // The matrix's account of any change in what the source reports, passed
+    // through so the block can explain providers kept off the chart.
+    measureBreaks: pricing.measureBreaks || null,
     providers: pricingProviders,
     sourceNote:
       'Directional ecosystem read-through · not a causal claim. ' +
       'Pricing QoQ: api.pricepertoken.com provider pricing history (equal-weighted, quarterly). ' +
       'Market share: canonical HISTORY_KV snapshots of OpenRouter top-N by weekly tokens, averaged over observed days per quarter. ' +
-      'Providers outside the OR top-N during a quarter are omitted, never imputed.',
+      'Providers outside the OR top-N during a quarter are omitted, never imputed. ' +
+      'Where the source changed how it reports a provider\'s prices between the two quarters, ' +
+      'that provider\'s price change is not computed and it makes no price callout.',
   });
 }
 

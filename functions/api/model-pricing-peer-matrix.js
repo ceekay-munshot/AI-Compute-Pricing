@@ -47,6 +47,7 @@
  *         key, provider, tier, label, modelDisplay, chosenCandidateNorms,
  *         input, output, qoqInput, qoqOutput, yoyInput, yoyOutput,
  *         obsCount, matchedModels, hasData,
+ *         priceBasis, basisExcludedObs, measureChanged,   // _model-price-basis.js
  *         repFreshness: {
  *           status: 'OK' | 'WATCH' | 'REVIEW' | 'STALE',
  *           reason: '...combined evidence sentence...',
@@ -85,6 +86,20 @@
  */
 
 import { withEdgeCache } from './_edge-cache.js';
+import {
+  readPrice,
+  rowDay,
+  buildBasisBook,
+  createTally,
+  tallyFor,
+  addToTally,
+  mergeTallies,
+  resolveTally,
+  resolvePeriodTallies,
+  growthSeries,
+  sparse,
+  describeMeasureBreaks,
+} from './_model-price-basis.js';
 
 const UPSTREAM_BASE = 'https://api.pricepertoken.com/api/provider-pricing-history/';
 // One hour. This was 24 hours on the grounds that it reduced upstream load and
@@ -603,7 +618,49 @@ function currentMonthKey() {
   return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0');
 }
 
-function round3(n) { return Math.round(n * 1000) / 1000; }
+/**
+ * Levels and changes for one priced series, at quarter and month grain.
+ *
+ * `t` holds four period -> tally maps (qIn, qOut, mIn, mOut). Every level
+ * rests on one measure and every change is computed — or refused — by
+ * _model-price-basis.js, so the rep rows, the frontier rows and the per-model
+ * history all apply one rule. The in-progress quarter and month are left out
+ * of every change, as before.
+ *
+ * priceBasis / basisExcludedObs / measureChanged are keyed by the field they
+ * annotate (input, inputMonthly, qoqInput, momOutput, ...), so a renderer
+ * looks one up with the key it already reads the value by. All three are
+ * sparse — only periods off the original measure, only refused changes — and
+ * absent altogether on a series the change never touched.
+ */
+function periodSeries(t, todayQ, todayM, books) {
+  const qIn = resolvePeriodTallies(t.qIn), qOut = resolvePeriodTallies(t.qOut);
+  const mIn = resolvePeriodTallies(t.mIn), mOut = resolvePeriodTallies(t.mOut);
+  const evIn = books.input.events, evOut = books.output.events;
+  const g = (res, priorFn, skip, events) => growthSeries(res.levels, priorFn, { skip, events });
+  const qoqIn  = g(qIn, priorQuarter, todayQ, evIn),   qoqOut  = g(qOut, priorQuarter, todayQ, evOut);
+  const yoyIn  = g(qIn, yearAgoQuarter, todayQ, evIn), yoyOut  = g(qOut, yearAgoQuarter, todayQ, evOut);
+  const momIn  = g(mIn, priorMonth, todayM, evIn),     momOut  = g(mOut, priorMonth, todayM, evOut);
+  const yoyMIn = g(mIn, yearAgoMonth, todayM, evIn),   yoyMOut = g(mOut, yearAgoMonth, todayM, evOut);
+  return {
+    input: qIn.values, output: qOut.values,
+    inputMonthly: mIn.values, outputMonthly: mOut.values,
+    qoqInput: qoqIn.growth, qoqOutput: qoqOut.growth,
+    momInput: momIn.growth, momOutput: momOut.growth,
+    yoyInput: yoyIn.growth, yoyOutput: yoyOut.growth,
+    yoyInputMonthly: yoyMIn.growth, yoyOutputMonthly: yoyMOut.growth,
+    priceBasis: sparse({ input: qIn.basis, output: qOut.basis, inputMonthly: mIn.basis, outputMonthly: mOut.basis }),
+    basisExcludedObs: sparse({ input: qIn.excluded, output: qOut.excluded, inputMonthly: mIn.excluded, outputMonthly: mOut.excluded }),
+    measureChanged: sparse({
+      qoqInput: qoqIn.measureChanged, qoqOutput: qoqOut.measureChanged,
+      momInput: momIn.measureChanged, momOutput: momOut.measureChanged,
+      yoyInput: yoyIn.measureChanged, yoyOutput: yoyOut.measureChanged,
+      yoyInputMonthly: yoyMIn.measureChanged, yoyOutputMonthly: yoyMOut.measureChanged,
+    }),
+    // Observations each level rests on; callers turn this into obsCount.
+    _n: { input: qIn.n, output: qOut.n, inputMonthly: mIn.n, outputMonthly: mOut.n },
+  };
+}
 
 /* Per-model history aggregation — used for the Google all-models view.
    Reads a provider fetch result and returns one entry per distinct upstream
@@ -611,7 +668,7 @@ function round3(n) { return Math.round(n * 1000) / 1000; }
    change ratios. Matches the same scaling, partial-period suppression, and
    field-name conventions used by the rep-level math above so the client
    renderer can reuse its formatters. */
-function buildPerModelHistory(providerData, todayQ, todayM) {
+function buildPerModelHistory(providerData, todayQ, todayM, books) {
   if (!providerData || !Array.isArray(providerData.rows) || !providerData.rows.length) return [];
 
   const byModel = new Map();
@@ -627,8 +684,8 @@ function buildPerModelHistory(providerData, todayQ, todayM) {
         firstDate: row.date,
         lastDate: row.date,
         obsCount: 0,
-        qBuckets: new Map(),
-        mBuckets: new Map(),
+        // period -> tally, per metric and grain (see periodSeries)
+        qIn: new Map(), qOut: new Map(), mIn: new Map(), mOut: new Map(),
       };
       byModel.set(key, entry);
     }
@@ -636,70 +693,37 @@ function buildPerModelHistory(providerData, todayQ, todayM) {
     if (row.date > entry.lastDate)  entry.lastDate  = row.date;
     entry.obsCount += 1;
 
+    const day = rowDay(row);
     const qid = quarterOf(row.date);
     const mid = monthOf(row.date);
-    if (!entry.qBuckets.has(qid)) entry.qBuckets.set(qid, { sumIn:0, nIn:0, sumOut:0, nOut:0 });
-    if (!entry.mBuckets.has(mid)) entry.mBuckets.set(mid, { sumIn:0, nIn:0, sumOut:0, nOut:0 });
-    const qb = entry.qBuckets.get(qid);
-    const mb = entry.mBuckets.get(mid);
-    const inP  = row?.pricing_prompt;
-    const outP = row?.pricing_completion;
-    if (typeof inP  === 'number' && isFinite(inP)  && inP  >= 0) { qb.sumIn  += inP;  qb.nIn  += 1; mb.sumIn  += inP;  mb.nIn  += 1; }
-    if (typeof outP === 'number' && isFinite(outP) && outP >= 0) { qb.sumOut += outP; qb.nOut += 1; mb.sumOut += outP; mb.nOut += 1; }
+    const qIn = tallyFor(entry.qIn, qid), qOut = tallyFor(entry.qOut, qid);
+    const mIn = tallyFor(entry.mIn, mid), mOut = tallyFor(entry.mOut, mid);
+    // >= 0 on purpose: each model is its own row here, so a genuinely free
+    // model shows as free (the rep math below keeps > 0).
+    const inP  = readPrice(row, 'input',  { allowZero: true });
+    const outP = readPrice(row, 'output', { allowZero: true });
+    if (inP !== null) {
+      const b = books.input.basisOf(providerData.slug, row.model, day);
+      addToTally(qIn, b, inP); addToTally(mIn, b, inP);
+    }
+    if (outP !== null) {
+      const b = books.output.basisOf(providerData.slug, row.model, day);
+      addToTally(qOut, b, outP); addToTally(mOut, b, outP);
+    }
   }
 
   const out = [];
   for (const e of byModel.values()) {
-    const input = {}, output = {};
-    for (const [qid, b] of e.qBuckets) {
-      input[qid]  = b.nIn  ? round3((b.sumIn  / b.nIn)  * 1_000_000) : null;
-      output[qid] = b.nOut ? round3((b.sumOut / b.nOut) * 1_000_000) : null;
-    }
-    const inputMonthly = {}, outputMonthly = {};
-    for (const [mid, b] of e.mBuckets) {
-      inputMonthly[mid]  = b.nIn  ? round3((b.sumIn  / b.nIn)  * 1_000_000) : null;
-      outputMonthly[mid] = b.nOut ? round3((b.sumOut / b.nOut) * 1_000_000) : null;
-    }
-
-    // Per-quarter QoQ/YoY (same partial-period suppression as the rep math)
-    const qoqInput = {}, qoqOutput = {}, yoyInput = {}, yoyOutput = {};
-    for (const qid of Object.keys(input)) {
-      if (qid === todayQ) continue;
-      const pq = priorQuarter(qid), yq = yearAgoQuarter(qid);
-      const inCur = input[qid], outCur = output[qid];
-      const inPri = input[pq],  outPri = output[pq];
-      const inYa  = input[yq],  outYa  = output[yq];
-      if (inCur  != null && inPri  != null && inPri  > 0) qoqInput[qid]  = round3((inCur  - inPri)  / inPri);
-      if (inCur  != null && inYa   != null && inYa   > 0) yoyInput[qid]  = round3((inCur  - inYa)   / inYa);
-      if (outCur != null && outPri != null && outPri > 0) qoqOutput[qid] = round3((outCur - outPri) / outPri);
-      if (outCur != null && outYa  != null && outYa  > 0) yoyOutput[qid] = round3((outCur - outYa)  / outYa);
-    }
-
-    const momInput = {}, momOutput = {}, yoyInputMonthly = {}, yoyOutputMonthly = {};
-    for (const mid of Object.keys(inputMonthly)) {
-      if (mid === todayM) continue;
-      const pm = priorMonth(mid), ym = yearAgoMonth(mid);
-      const inCur = inputMonthly[mid], outCur = outputMonthly[mid];
-      const inPri = inputMonthly[pm],  outPri = outputMonthly[pm];
-      const inYa  = inputMonthly[ym], outYa  = outputMonthly[ym];
-      if (inCur  != null && inPri  != null && inPri  > 0) momInput[mid]         = round3((inCur  - inPri)  / inPri);
-      if (inCur  != null && inYa   != null && inYa   > 0) yoyInputMonthly[mid]  = round3((inCur  - inYa)   / inYa);
-      if (outCur != null && outPri != null && outPri > 0) momOutput[mid]        = round3((outCur - outPri) / outPri);
-      if (outCur != null && outYa  != null && outYa  > 0) yoyOutputMonthly[mid] = round3((outCur - outYa)  / outYa);
-    }
-
+    // Same partial-period suppression and the same change-of-measure rule as
+    // the rep math, from the same routine.
+    const { _n, ...series } = periodSeries(e, todayQ, todayM, books);
     out.push({
       model: e.model,
       norm: e.norm,
       firstDate: e.firstDate.slice(0, 10),
       lastDate: e.lastDate.slice(0, 10),
       obsCount: e.obsCount,
-      input, output,
-      inputMonthly, outputMonthly,
-      qoqInput, qoqOutput,
-      momInput, momOutput,
-      yoyInput, yoyOutput,
-      yoyInputMonthly, yoyOutputMonthly,
+      ...series,
     });
   }
 
@@ -1016,6 +1040,16 @@ async function buildPeerMatrix(request, env) {
     }, 502, { 'Cache-Control': 'no-store' });
   }
 
+  // Which measure every row sits on, decided once from this response's own
+  // rows (see _model-price-basis.js). Input and output are detected
+  // separately: the source could change one without the other.
+  const books = {
+    input: buildBasisBook(fetched, 'input'),
+    output: buildBasisBook(fetched, 'output'),
+  };
+  const todayQ = currentQuarterKey();
+  const todayM = currentMonthKey();
+
   const allQuarters = new Set();
   const allMonths = new Set();
   let earliestDate = null;
@@ -1044,8 +1078,7 @@ async function buildPeerMatrix(request, env) {
     }
 
     const matchedModelSet = new Set();
-    const buckets = new Map();
-    const monthBuckets = new Map();
+    const t = { qIn: new Map(), qOut: new Map(), mIn: new Map(), mOut: new Map() };
     for (const row of matched) {
       const dateStr = row?.date;
       if (typeof dateStr !== 'string' || dateStr.length < 10) continue;
@@ -1054,38 +1087,36 @@ async function buildPeerMatrix(request, env) {
       const mid = monthOf(dateStr);
       allQuarters.add(qid);
       allMonths.add(mid);
-      if (!buckets.has(qid)) buckets.set(qid, { sumIn: 0, nIn: 0, sumOut: 0, nOut: 0 });
-      if (!monthBuckets.has(mid)) monthBuckets.set(mid, { sumIn: 0, nIn: 0, sumOut: 0, nOut: 0 });
-      const b = buckets.get(qid);
-      const mb = monthBuckets.get(mid);
-      const inP  = row?.pricing_prompt;
-      const outP = row?.pricing_completion;
+      const day = rowDay(row);
+      const qIn = tallyFor(t.qIn, qid), qOut = tallyFor(t.qOut, qid);
+      const mIn = tallyFor(t.mIn, mid), mOut = tallyFor(t.mOut, mid);
       // Strictly > 0: a $0.00 observation on a paid model class is a free /
       // experimental SKU that upstream files under the same family (Google's
       // gemini-2.5-pro-exp-* rows are $0.00). Averaging those in drags the
       // rep's price toward zero and reads as a price cut that never happened.
       // buildPerModelHistory below keeps >= 0 on purpose — there each model is
       // its own row, so a genuinely free model should show as free.
-      if (typeof inP  === 'number' && isFinite(inP)  && inP  > 0) { b.sumIn  += inP;  b.nIn  += 1; mb.sumIn  += inP;  mb.nIn  += 1; }
-      if (typeof outP === 'number' && isFinite(outP) && outP > 0) { b.sumOut += outP; b.nOut += 1; mb.sumOut += outP; mb.nOut += 1; }
+      const inP  = readPrice(row, 'input');
+      const outP = readPrice(row, 'output');
+      if (inP !== null) {
+        const b = books.input.basisOf(rep.providerSlug, row.model, day);
+        addToTally(qIn, b, inP, row.model); addToTally(mIn, b, inP, row.model);
+      }
+      if (outP !== null) {
+        const b = books.output.basisOf(rep.providerSlug, row.model, day);
+        addToTally(qOut, b, outP, row.model); addToTally(mOut, b, outP, row.model);
+      }
       if (row.model) matchedModelSet.add(row.model);
     }
 
-    const input = {}, output = {}, obsCount = {};
-    for (const [qid, b] of buckets) {
-      // Upstream is $/token; scale to $/1M for display parity with the rest
-      // of the dashboard's pricing surfaces.
-      input[qid]  = b.nIn  ? round3((b.sumIn  / b.nIn)  * 1_000_000) : null;
-      output[qid] = b.nOut ? round3((b.sumOut / b.nOut) * 1_000_000) : null;
-      obsCount[qid] = b.nIn || b.nOut;
-    }
-
-    const inputMonthly = {}, outputMonthly = {}, monthObsCount = {};
-    for (const [mid, mb] of monthBuckets) {
-      inputMonthly[mid]  = mb.nIn  ? round3((mb.sumIn  / mb.nIn)  * 1_000_000) : null;
-      outputMonthly[mid] = mb.nOut ? round3((mb.sumOut / mb.nOut) * 1_000_000) : null;
-      monthObsCount[mid] = mb.nIn || mb.nOut;
-    }
+    // Upstream is $/token; periodSeries scales to $/1M for display parity
+    // with the rest of the dashboard's pricing surfaces, puts each period's
+    // level on one measure, and computes every change with the refusal rule.
+    const { _n, ...series } = periodSeries(t, todayQ, todayM, books);
+    const obsCount = {}, monthObsCount = {};
+    for (const qid of Object.keys(series.input)) obsCount[qid] = _n.input[qid] || _n.output[qid];
+    for (const mid of Object.keys(series.inputMonthly)) monthObsCount[mid] = _n.inputMonthly[mid] || _n.outputMonthly[mid];
+    const { input, output, inputMonthly, outputMonthly } = series;
 
     return {
       key: rep.key,
@@ -1106,55 +1137,24 @@ async function buildPeerMatrix(request, env) {
       inputMonthly,
       outputMonthly,
       monthObsCount,
+      // QoQ / YoY (quarterly) and MoM / YoY (monthly) for input + output.
+      // The in-progress quarter and month are suppressed so a partial
+      // average is never compared against a full one, and a comparison
+      // across a change of measure is refused, its reason in measureChanged.
+      qoqInput: series.qoqInput,
+      qoqOutput: series.qoqOutput,
+      yoyInput: series.yoyInput,
+      yoyOutput: series.yoyOutput,
+      momInput: series.momInput,
+      momOutput: series.momOutput,
+      yoyInputMonthly: series.yoyInputMonthly,
+      yoyOutputMonthly: series.yoyOutputMonthly,
+      priceBasis: series.priceBasis,
+      basisExcludedObs: series.basisExcludedObs,
+      measureChanged: series.measureChanged,
       matchedModels: Array.from(matchedModelSet).sort(),
-      _buckets: buckets,
     };
   });
-
-  const todayQ = currentQuarterKey();
-  const todayM = currentMonthKey();
-
-  // Compute QoQ / YoY for input + output. Suppress for the QTD quarter so
-  // partial-quarter averages don't get compared against full quarters.
-  // Same logic mirrored at month granularity into momInput/momOutput/
-  // yoyInputMonthly/yoyOutputMonthly so consumers can pick the granularity
-  // they want without a second round-trip.
-  for (const rep of reps) {
-    rep.qoqInput = {};
-    rep.qoqOutput = {};
-    rep.yoyInput = {};
-    rep.yoyOutput = {};
-    for (const qid of Object.keys(rep.input)) {
-      if (qid === todayQ) continue;
-      const pq = priorQuarter(qid);
-      const yq = yearAgoQuarter(qid);
-      const inCur = rep.input[qid],  outCur = rep.output[qid];
-      const inPri = rep.input[pq],   outPri = rep.output[pq];
-      const inYa  = rep.input[yq],   outYa  = rep.output[yq];
-      if (inCur  != null && inPri  != null && inPri  > 0) rep.qoqInput[qid]  = round3((inCur  - inPri)  / inPri);
-      if (inCur  != null && inYa   != null && inYa   > 0) rep.yoyInput[qid]  = round3((inCur  - inYa)   / inYa);
-      if (outCur != null && outPri != null && outPri > 0) rep.qoqOutput[qid] = round3((outCur - outPri) / outPri);
-      if (outCur != null && outYa  != null && outYa  > 0) rep.yoyOutput[qid] = round3((outCur - outYa)  / outYa);
-    }
-
-    rep.momInput = {};
-    rep.momOutput = {};
-    rep.yoyInputMonthly = {};
-    rep.yoyOutputMonthly = {};
-    for (const mid of Object.keys(rep.inputMonthly)) {
-      if (mid === todayM) continue; // suppress MTD vs full-month comparisons
-      const pm = priorMonth(mid);
-      const ym = yearAgoMonth(mid);
-      const inCur = rep.inputMonthly[mid],  outCur = rep.outputMonthly[mid];
-      const inPri = rep.inputMonthly[pm],   outPri = rep.outputMonthly[pm];
-      const inYa  = rep.inputMonthly[ym],   outYa  = rep.outputMonthly[ym];
-      if (inCur  != null && inPri  != null && inPri  > 0) rep.momInput[mid]         = round3((inCur  - inPri)  / inPri);
-      if (inCur  != null && inYa   != null && inYa   > 0) rep.yoyInputMonthly[mid]  = round3((inCur  - inYa)   / inYa);
-      if (outCur != null && outPri != null && outPri > 0) rep.momOutput[mid]        = round3((outCur - outPri) / outPri);
-      if (outCur != null && outYa  != null && outYa  > 0) rep.yoyOutputMonthly[mid] = round3((outCur - outYa)  / outYa);
-    }
-    delete rep._buckets;
-  }
 
   // Quarters chronological so the renderer reads left → right
   const quarters = Array.from(allQuarters).sort().map(qid => {
@@ -1189,7 +1189,7 @@ async function buildPeerMatrix(request, env) {
      deliberately separate) measure from the fixed-rep matrix above, which is
      the one to read for same-model repricing. The UI labels both. */
   function buildFrontierSeries(provider, rules, periodOf, currentPeriodKey, priorPeriodFn, yearAgoPeriodFn) {
-    // period -> model -> price accumulator
+    // period -> model -> { in, out } tallies, each observation on its measure
     const byPeriod = new Map();
     for (const row of provider?.rows || []) {
       if (typeof row?.date !== 'string' || row.date.length < 10) continue;
@@ -1200,22 +1200,23 @@ async function buildPeerMatrix(request, env) {
       // Alternate-billing rows never represent the frontier — same exclusion
       // the rep math applies, for the same reason.
       if (ALT_BILLING_SKU.test(row.model)) continue;
-      const acc = models.get(row.model) || { sumIn: 0, nIn: 0, sumOut: 0, nOut: 0 };
-      const inP = row?.pricing_prompt, outP = row?.pricing_completion;
-      if (typeof inP  === 'number' && isFinite(inP)  && inP  > 0) { acc.sumIn  += inP;  acc.nIn  += 1; }
-      if (typeof outP === 'number' && isFinite(outP) && outP > 0) { acc.sumOut += outP; acc.nOut += 1; }
+      const acc = models.get(row.model) || { in: createTally(), out: createTally() };
+      const day = rowDay(row);
+      const inP = readPrice(row, 'input'), outP = readPrice(row, 'output');
+      if (inP  !== null) addToTally(acc.in,  books.input.basisOf(provider.slug, row.model, day),  inP,  row.model);
+      if (outP !== null) addToTally(acc.out, books.output.basisOf(provider.slug, row.model, day), outP, row.model);
       models.set(row.model, acc);
     }
 
-    const cells = {}, input = {}, output = {};
+    const cells = {}, tIn = new Map(), tOut = new Map();
     for (const [pid, models] of byPeriod) {
       // Feed the picker each model observed in THIS period with its own
-      // average input price, so "priciest variant of the winning generation"
-      // is decided on what the period actually charged.
-      const entries = Array.from(models.entries()).map(([model, acc]) => ({
-        model,
-        avgInput: acc.nIn ? (acc.sumIn / acc.nIn) * 1_000_000 : null,
-      }));
+      // average input price, on one measure, so "priciest variant of the
+      // winning generation" is decided on what the period actually charged.
+      const entries = Array.from(models.entries()).map(([model, acc]) => {
+        const r = resolveTally(acc.in);
+        return { model, avgInput: r.mean === null ? null : r.mean * 1_000_000 };
+      });
       const picked = pickFrontier(entries, rules);
       if (!picked) { cells[pid] = null; continue; }
       cells[pid] = {
@@ -1227,32 +1228,27 @@ async function buildPeerMatrix(request, env) {
         matchedVariants: picked.matchedVariants,
       };
       // Price the frontier across every variant of the winning model class
-      // in this period (dated re-publishes of the same model).
-      let sumIn = 0, nIn = 0, sumOut = 0, nOut = 0;
-      for (const m of picked.matchedVariants) {
-        const acc = models.get(m);
-        if (!acc) continue;
-        sumIn += acc.sumIn; nIn += acc.nIn; sumOut += acc.sumOut; nOut += acc.nOut;
-      }
-      input[pid]  = nIn  ? round3((sumIn  / nIn)  * 1_000_000) : null;
-      output[pid] = nOut ? round3((sumOut / nOut) * 1_000_000) : null;
+      // in this period (dated re-publishes of the same model), on one measure.
+      tIn.set(pid, mergeTallies(picked.matchedVariants.map(m => models.get(m)?.in)));
+      tOut.set(pid, mergeTallies(picked.matchedVariants.map(m => models.get(m)?.out)));
     }
+    const rIn = resolvePeriodTallies(tIn), rOut = resolvePeriodTallies(tOut);
 
     // Period-over-period and year-over-year on the frontier cost series.
-    // Suppressed for the in-progress period, same rule as the rep matrix.
-    const chgInput = {}, chgOutput = {}, yoyInput = {}, yoyOutput = {};
-    for (const pid of Object.keys(input)) {
-      if (pid === currentPeriodKey) continue;
-      const pp = priorPeriodFn(pid), yp = yearAgoPeriodFn(pid);
-      const inCur = input[pid],  outCur = output[pid];
-      const inPri = input[pp],   outPri = output[pp];
-      const inYa  = input[yp],   outYa  = output[yp];
-      if (inCur  != null && inPri  != null && inPri  > 0) chgInput[pid]  = round3((inCur  - inPri)  / inPri);
-      if (outCur != null && outPri != null && outPri > 0) chgOutput[pid] = round3((outCur - outPri) / outPri);
-      if (inCur  != null && inYa   != null && inYa   > 0) yoyInput[pid]  = round3((inCur  - inYa)   / inYa);
-      if (outCur != null && outYa  != null && outYa  > 0) yoyOutput[pid] = round3((outCur - outYa)  / outYa);
-    }
-    return { cells, input, output, chgInput, chgOutput, yoyInput, yoyOutput };
+    // Suppressed for the in-progress period, same rule as the rep matrix, and
+    // refused across a change of measure, same rule again.
+    const g = (res, fn, events) => growthSeries(res.levels, fn, { skip: currentPeriodKey, events });
+    const chgIn = g(rIn, priorPeriodFn, books.input.events),   chgOut = g(rOut, priorPeriodFn, books.output.events);
+    const yoyIn = g(rIn, yearAgoPeriodFn, books.input.events), yoyOut = g(rOut, yearAgoPeriodFn, books.output.events);
+    return {
+      cells,
+      input: rIn.values, output: rOut.values,
+      chgInput: chgIn.growth, chgOutput: chgOut.growth,
+      yoyInput: yoyIn.growth, yoyOutput: yoyOut.growth,
+      basisIn: rIn.basis, basisOut: rOut.basis,
+      refusedChgIn: chgIn.measureChanged, refusedChgOut: chgOut.measureChanged,
+      refusedYoyIn: yoyIn.measureChanged, refusedYoyOut: yoyOut.measureChanged,
+    };
   }
 
   const frontierReference = FRONTIER_REFERENCE_PROVIDERS.map(prov => {
@@ -1313,6 +1309,14 @@ async function buildPeerMatrix(request, env) {
       momOutput: m.chgOutput,
       yoyInputMonthly: m.yoyInput,
       yoyOutputMonthly: m.yoyOutput,
+      // Same annotations as the rep rows, keyed by the field they annotate.
+      priceBasis: sparse({ input: q.basisIn, output: q.basisOut, inputMonthly: m.basisIn, outputMonthly: m.basisOut }),
+      measureChanged: sparse({
+        chgInput: q.refusedChgIn, chgOutput: q.refusedChgOut,
+        yoyInput: q.refusedYoyIn, yoyOutput: q.refusedYoyOut,
+        momInput: m.refusedChgIn, momOutput: m.refusedChgOut,
+        yoyInputMonthly: m.refusedYoyIn, yoyOutputMonthly: m.refusedYoyOut,
+      }),
     };
   });
 
@@ -1349,7 +1353,7 @@ async function buildPeerMatrix(request, env) {
   // let the renderer decide how to group, so the classifier stays close to
   // the visual logic.
   const googleProvider = byProvider.get('google');
-  const googleModels = buildPerModelHistory(googleProvider, todayQ, todayM);
+  const googleModels = buildPerModelHistory(googleProvider, todayQ, todayM, books);
 
   // External catalog is OPTIONAL — used only for discovery/freshness drift.
   // Pricing math (avg, QoQ, YoY) above is fully sourced from pricepertoken
@@ -1389,10 +1393,20 @@ async function buildPeerMatrix(request, env) {
       'Alternate-billing SKUs (:batch, :beta, :thinking, :free, :extended, :exacto) and ' +
       'sibling product lines (gpt-5-pro vs gpt-5, *-customtools, *-fast) are excluded from ' +
       'every price average, as are $0.00 experimental rows — each of these would otherwise ' +
-      'register as a price move when only the upstream catalog changed. externalCatalog (when ' +
+      'register as a price move when only the upstream catalog changed. Where the source changed ' +
+      'what it reports — many models moving by one exact factor on the same day — each period ' +
+      'averages one measure only and changes across it are not computed. externalCatalog (when ' +
       'enabled) is a Firecrawl-discovered list of models the provider currently ' +
       'documents, used purely as a freshness audit signal — pricing math never reads it.',
     earliestDateObserved: earliestDate ? earliestDate.slice(0, 10) : null,
+    // Every day on which the source changed what it reports, found from this
+    // response's own rows, and the plain-words caption the matrix shows for it.
+    measureBreaks: {
+      input: books.input.events,
+      output: books.output.events,
+      summary: describeMeasureBreaks([books.input.events, books.output.events],
+        slug => PEER_MODELS.find(r => r.providerSlug === slug)?.provider || slug),
+    },
     // Coverage — lets the client explain an empty change section instead of
     // rendering a wall of dashes with no reason given. Upstream history
     // starts 2025-07-28, so no QUARTER yet has a year-ago comparator (the
@@ -1402,10 +1416,18 @@ async function buildPeerMatrix(request, env) {
     coverage: {
       quarterCount: quarters.length,
       monthCount: months.length,
+      //
+      // "Has a comparator", not "has a number": a YoY refused because the
+      // source changed what it reports in between still HAD its year-ago
+      // period, and must not be explained away as "no comparator yet".
       quarterlyYoYAvailable: reps.some(r => Object.keys(r.yoyInput || {}).length > 0
-                                         || Object.keys(r.yoyOutput || {}).length > 0),
+                                         || Object.keys(r.yoyOutput || {}).length > 0
+                                         || Object.keys(r.measureChanged?.yoyInput || {}).length > 0
+                                         || Object.keys(r.measureChanged?.yoyOutput || {}).length > 0),
       monthlyYoYAvailable:   reps.some(r => Object.keys(r.yoyInputMonthly || {}).length > 0
-                                         || Object.keys(r.yoyOutputMonthly || {}).length > 0),
+                                         || Object.keys(r.yoyOutputMonthly || {}).length > 0
+                                         || Object.keys(r.measureChanged?.yoyInputMonthly || {}).length > 0
+                                         || Object.keys(r.measureChanged?.yoyOutputMonthly || {}).length > 0),
     },
     quarters,
     months,
