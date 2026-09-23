@@ -4,50 +4,11 @@ import { buildXlsx, downloadXlsx } from "./xlsx-export.js";
 import { buildGPUPricingWorkbook, gpuWorkbookFilename } from "./gpu-xlsx-report.js";
 import { resilienceSignal, LOW_PRICED_COVERAGE } from "./gpu-resilience.js";
 
-/* ─── Live data fetched by me right now (Apr 11 2026) ───────
-   Sources:
-   OR:    raw.githubusercontent.com/jampongsathorn/openrouter-rankings (Apr 1 2026)
-   Radar: websearchapi.ai citing Cloudflare Radar (Mar 4–Apr 3 2026)
-   Bots:  Cloudflare Radar AI Insights
-   Filing: SEC 8-K exhibit, filed Feb 4 2026
-──────────────────────────────────────────────────────────── */
-const LIVE = {
-  fetchedAt: "Apr 11 2026 · 17:45 UTC",
-  or: [
-    {rank:1,model:"grok-4.1-fast",           provider:"x-ai",       tokens:"53.8M",tokRaw:53810188,wow:"-24%",wowN:-24,isGemini:false},
-    {rank:2,model:"gemini-2.5-flash-lite",    provider:"google",     tokens:"33.7M",tokRaw:33666645,wow:"-64%",wowN:-64,isGemini:true},
-    {rank:3,model:"gemini-2.5-flash",         provider:"google",     tokens:"29.4M",tokRaw:29408225,wow:"-67%",wowN:-67,isGemini:true},
-    {rank:4,model:"gpt-oss-120b",             provider:"openai",     tokens:"29.2M",tokRaw:29203585,wow:"-65%",wowN:-65,isGemini:false},
-    {rank:5,model:"gemini-3-flash-preview",   provider:"google",     tokens:"22.3M",tokRaw:22263082,wow:"-64%",wowN:-64,isGemini:true},
-    {rank:6,model:"deepseek-v3.2",            provider:"deepseek",   tokens:"20.8M",tokRaw:20769070,wow:"-66%",wowN:-66,isGemini:false},
-    {rank:7,model:"gpt-4o-mini",              provider:"openai",     tokens:"12.3M",tokRaw:12285405,wow:"-66%",wowN:-66,isGemini:false},
-    {rank:8,model:"llama-3.1-8b-instruct",    provider:"meta-llama", tokens:"9.29M",tokRaw:9288457, wow:"-68%",wowN:-68,isGemini:false},
-    {rank:9,model:"gemini-3.1-flash-lite-preview",provider:"google", tokens:"8.14M",tokRaw:8143622, wow:"-64%",wowN:-64,isGemini:true},
-  ],
-  bots: [
-    {name:"Googlebot",          pct:31.6,color:"#10b981"},
-    {name:"Meta-ExternalAgent", pct:16.7,color:"#8b5cf6"},
-    {name:"GPTBot",             pct:12.0,color:"#3b82f6"},
-    {name:"ClaudeBot",          pct:11.7,color:"#f59e0b"},
-    {name:"Bingbot",            pct:8.2, color:"#06b6d4"},
-    {name:"Applebot",           pct:5.8, color:"#ec4899"},
-    {name:"Others",             pct:14.0,color:"#9ca3af"},
-  ],
-  trends: [
-    {term:"ChatGPT",   score:100,color:"#3b82f6"},
-    {term:"Gemini AI", score:68, color:"#10b981"},
-    {term:"Copilot",   score:42, color:"#8b5cf6"},
-    {term:"Claude AI", score:28, color:"#f59e0b"},
-    {term:"Perplexity",score:19, color:"#ef4444"},
-  ],
-  filing: {
-    period:"Q4 2025",
-    searchRevenue:"$63.1B", searchRevenueGrowth:"+17%",
-    paidClicksGrowth:"+13%", cpcGrowth:"-1%",
-    totalRevenue:"$113.8B", totalRevenueGrowth:"+18%",
-    source:"https://www.sec.gov/Archives/edgar/data/1652044/000165204426000012/googexhibit991q42025.htm",
-  },
-};
+/* The hard-coded April-2026 `LIVE` fixture that used to sit here was removed.
+   It held invented-looking OpenRouter, Radar, bots and SEC-filing figures for
+   tabs this dashboard does not have, reached nothing on screen, and was exactly
+   the sort of leftover that gets wired back up by mistake. Every figure here is
+   fetched at runtime. */
 
 /* ─── colours ───────────────────────────────────────────── */
 const PROV_C={google:"#10b981",openai:"#3b82f6","x-ai":"#8b5cf6",anthropic:"#f59e0b",meta:"#ef4444","meta-llama":"#ef4444",deepseek:"#06b6d4",other:"#9ca3af"};
@@ -142,67 +103,11 @@ function usePanel(seedData,fetcher){
   return{data,busy,ts,live,refresh};
 }
 
-/* ─── live fetchers — call deployed /api/* endpoints ────── */
-const TIMEOUT=25000;
-function timedFetch(url,opts={}){
-  const c=new AbortController();
-  const t=setTimeout(()=>c.abort(),TIMEOUT);
-  return fetch(url,{...opts,signal:c.signal}).finally(()=>clearTimeout(t));
-}
-
-async function fetchOR(){
-  const r=await timedFetch("/api/openrouter?view=week&top=30");
-  const d=await r.json();
-  if(!d.success||!d.models?.length)throw new Error(d.error||"empty");
-  const seen={};
-  const parseTok=(lbl,raw)=>{
-    if(raw&&raw>0)return raw;
-    const m=(lbl||"").match(/([\d.]+)\s*([BT])/i);
-    if(!m)return 0;
-    const v=parseFloat(m[1]),u=m[2].toUpperCase();
-    return u==="T"?v*1e12:v*1e9;
-  };
-  return d.models.map(m=>{
-    const name=(m.model||"").replace(/\[([^\]]+)\]\([^)]*\)/g,"$1").replace(/^by\s+/i,"").trim();
-    return {
-      rank:m.rank,model:name,provider:m.provider,
-      tokens:m.tokensLabel,tokRaw:parseTok(m.tokensLabel,m.tokens),
-      wow:m.wowLabel||"—",wowN:m.wowPct,isGemini:m.isGemini||/gemini/i.test(name),
-    };
-  }).filter(m=>{const k=m.rank+"-"+m.model;if(seen[k])return false;seen[k]=true;return true});
-}
-
-async function fetchRadar(){
-  const r=await timedFetch("/api/radar/ai/bots/summary/user_agent?dateRange=28d");
-  const d=await r.json();
-  const raw=d?.result?.summary_0||{};
-  const BOT_COLORS=["#10b981","#8b5cf6","#3b82f6","#f59e0b","#06b6d4","#ec4899","#9ca3af","#ef4444"];
-  const entries=Object.entries(raw)
-    .filter(([k])=>k!=="timestamps")
-    .map(([name,val])=>({name,pct:Math.round(parseFloat(val)*10)/10}))
-    .filter(b=>b.pct>0).sort((a,b)=>b.pct-a.pct).slice(0,8)
-    .map((b,i)=>({...b,color:BOT_COLORS[i%BOT_COLORS.length]}));
-  if(!entries.length)throw new Error("empty");
-  return entries;
-}
-
-async function fetchTrends(){
-  const r=await timedFetch("/api/trends?window=12m");
-  const d=await r.json();
-  if(!d.success)throw new Error(d.error||"failed");
-  const TC={"Gemini AI":"#10b981","ChatGPT":"#3b82f6","Claude AI":"#f59e0b","Perplexity":"#ef4444","Copilot":"#8b5cf6"};
-  return (d.summary||[])
-    .filter(s=>s.latest!==null)
-    .map(s=>({term:s.term,score:Math.round(s.latest||0),color:TC[s.term]||"#9ca3af"}))
-    .sort((a,b)=>b.score-a.score);
-}
-
-async function fetchFiling(){
-  const r=await timedFetch("/api/google-filings");
-  const d=await r.json();
-  if(!d.success)throw new Error(d.error||"failed");
-  return d;
-}
+/* The four /api fetchers that used to live here — fetchOR, fetchRadar,
+   fetchTrends, fetchFiling, with their timedFetch/TIMEOUT helper — were
+   removed. Nothing called them, and three pointed at endpoints this repo does
+   not deploy (/api/radar, /api/trends, /api/google-filings). They are still in
+   google-dash, which has the tabs that use them. */
 
 /* ═══════════════════════════════════════════════════════
    FILING ANCHOR ROW
@@ -4156,7 +4061,8 @@ export default function App(){
   const[tab,setTab]=useState("pricing");
   const[refreshTick,setRefreshTick]=useState(0);
 
-  // The header's timestamp. It was first a build-time literal (LIVE.fetchedAt,
+  // The header's timestamp. It was first a build-time literal (the `LIVE`
+  // fixture's fetchedAt, since removed —
   // "Apr 11 2026 · 17:45 UTC") that was stale for every visitor from the day it
   // was written, then the moment a refresh STARTED — which read as "these
   // figures are from now" even when every fetch after it failed. It is now the
