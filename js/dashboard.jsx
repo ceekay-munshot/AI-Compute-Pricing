@@ -1627,37 +1627,23 @@ function fmtUSD(v){
   return"$"+v.toFixed(2);
 }
 
-/* ─── GPU price capture note ─────────────────────────────────
-   Everything historical on this tab — period averages, quarter closes, the
-   daily table — is built from one GPU price capture a day. When that stops,
-   the history simply ends and nothing on screen says its last point is old;
-   when it misses a run of days, the periods around the hole rest on fewer
-   days than their labels suggest. Neither the 2026-08-22 → 2026-09-10 hole
-   nor the stop after 2026-09-16 was visible anywhere. The wider daily
-   capture kept running through both — only the GPU prices were missing — so
-   the wording names GPU prices, not the capture. When it counts as stopped
-   (over 3 days) and which holes matter (5+ days) are the server's decisions,
-   read from its data-quality block, not re-derived here. */
-function isoAddDays(iso,n){
-  const t=Date.parse(iso+"T00:00:00Z");
-  return isFinite(t)?new Date(t+n*86400000).toISOString().slice(0,10):iso;
-}
+/* The as-of date for the GPU figures.
+
+   This was an amber banner spelling out that the feed had stopped and how
+   many days were missing. Removed at the owner's request, along with the
+   basis-change caption below — a customer should not be read a feed-health
+   report. What survives is the one fact a reader cannot do without: the day
+   these prices are from. Without it the tab presents a stale capture as
+   today's market, which is the failure this note originally existed to stop.
+   The gap detail is still in /api/gpu-hardware-pricing-history for anyone
+   who needs it. */
 function GPUCaptureNote({dq}){
   if(!dq)return null;
-  const ago=n=>n!=null?" ("+n+" day"+(n===1?"":"s")+" ago)":"";
-  const lines=[];
-  if(dq.gpuFeedStale&&dq.latestGPUObservationDate){
-    lines.push(<><b style={{fontWeight:600}}>No GPU prices captured since {dq.latestGPUObservationDate}</b>{ago(dq.daysSinceLatestGPUObservation)}. The price history on this tab ends there — it is not a current reading.</>);
-  }else if(dq.priceFieldStale&&dq.latestPricedObservationDate){
-    lines.push(<><b style={{fontWeight:600}}>No new GPU price captured since {dq.latestPricedObservationDate}</b>{ago(dq.daysSinceLatestPricedObservation)}. The price history on this tab ends there — it is not a current reading.</>);
-  }
-  for(const g of (dq.significantCaptureGaps||[])){
-    lines.push(<><b style={{fontWeight:600}}>No GPU prices captured for {g.missingDays} days, {isoAddDays(g.afterDate,1)} to {isoAddDays(g.beforeDate,-1)}.</b> The months and quarters around it rest on fewer days than their length.</>);
-  }
-  if(!lines.length)return null;
+  const asOf=dq.latestGPUObservationDate||dq.latestPricedObservationDate||null;
+  if(!asOf)return null;
   return(
-    <div role="note" style={{background:"#fffbeb",border:"0.5px solid #fde68a",borderRadius:6,padding:"7px 11px",marginTop:8,fontSize:11,color:"#92400e",lineHeight:1.5}}>
-      {lines.map((l,i)=><div key={i}>{l}</div>)}
+    <div style={{fontSize:11,color:"#9ca3af",marginTop:6}}>
+      Prices as of <b style={{color:"#6b7280",fontWeight:600}}>{asOf}</b>
     </div>
   );
 }
@@ -2387,100 +2373,6 @@ function fmtGrowth(v){
   return <span style={{color}}>{str}</span>;
 }
 
-/* ─── Feed integrity banner ─────────────────────────────────
-   The matrix renders a missing price and a real $0.00 identically: as an
-   em-dash. That is fine when one cell is empty and actively misleading when
-   a whole column is, because the table still *looks* complete — it just gets
-   shorter or sprouts blanks. This banner states the feed's actual condition
-   above the matrix so a stalled capture can never be read as a flat market.
-
-   Two failure modes are reported separately because they have different
-   fixes: the GPU block no longer arriving at all (capture/cron side), versus
-   the block still arriving with minPricePerHour null (upstream shape change,
-   provider counts keep updating while prices go blank). */
-function GPUFeedIntegrityBanner({dq,periodNoun}){
-  if(!dq)return null;
-  const notes=[];
-  if(dq.priceFieldDroppedWhileFeedLive&&dq.latestPricedObservationDate){
-    notes.push({
-      k:"pricefield",
-      sev:"high",
-      head:"Price field missing from the feed since "+dq.latestPricedObservationDate,
-      body:"GPU rows kept arriving after that date — provider counts are still updating — but minPricePerHour came back empty, so every price cell from then on is blank. "
-           +dq.unpricedDays+" of "+dq.observationDays+" captured days carry no price.",
-    });
-  }else if(dq.priceFieldStale&&dq.latestPricedObservationDate){
-    notes.push({
-      k:"pricestale",
-      sev:"high",
-      head:"No new price observed since "+dq.latestPricedObservationDate,
-      body:"Price cells reflect data that is "+dq.daysSinceLatestPricedObservation+" days old.",
-    });
-  }
-  if(dq.gpuFeedStale&&dq.latestGPUObservationDate){
-    notes.push({
-      k:"feedstale",
-      sev:"high",
-      head:"GPU capture stalled — last observation "+dq.latestGPUObservationDate,
-      body:"That is "+dq.daysSinceLatestGPUObservation+" days ago. Nothing after that date has been captured for any SKU, so the most recent "
-           +periodNoun+" columns are empty rather than flat.",
-    });
-  }
-  // A run of days with no capture at all. The month columns just look thin
-  // when this happens, which reads as a quiet market rather than a missing
-  // one — the 2026-08-22 → 2026-09-10 outage is why Sep-26 rests on six days.
-  for(const g of (dq.significantCaptureGaps||[])){
-    notes.push({
-      k:"capgap-"+g.afterDate,
-      sev:"med",
-      head:g.missingDays+" days with no capture: "+g.afterDate+" → "+g.beforeDate,
-      body:"The months either side of the gap rest on fewer days than their length suggests, so their averages are thinner than the column label implies.",
-    });
-  }
-  // The capture writing prices into the wrong field is what blanked August in
-  // the first place. It is repaired on read, but if this count starts growing
-  // again the capture has regressed and the matrix would otherwise look fine.
-  if(dq.remappedPriceDays>0){
-    notes.push({
-      k:"remap",
-      sev:"low",
-      head:dq.remappedPriceDays+" day"+(dq.remappedPriceDays===1?"":"s")+" recovered from the feed's max field",
-      body:"Those captures landed with the price in maxPricePerHour because the source swapped its range for a single figure. They are reclassified as medians on read; the stored snapshots are untouched. A rising count means the capture has regressed.",
-    });
-  }
-  if(dq.monthsMissing?.length||dq.quartersMissing?.length){
-    const miss=[...(dq.monthsMissing||[]),...(dq.quartersMissing||[])];
-    notes.push({
-      k:"gaps",
-      sev:"med",
-      head:"Gap "+(miss.length===1?"period":"periods")+": "+miss.join(", "),
-      body:"Shown as empty columns rather than dropped from the axis, so the hole stays visible.",
-    });
-  }
-  if(dq.monthsUnpriced?.length||dq.quartersUnpriced?.length){
-    const un=[...(dq.monthsUnpriced||[]),...(dq.quartersUnpriced||[])];
-    notes.push({
-      k:"unpriced",
-      sev:"med",
-      head:"Captured but unpriced: "+un.join(", "),
-      body:"These columns have provider counts but no price, so they contribute nothing to growth or resilience.",
-    });
-  }
-  if(!notes.length)return null;
-  const high=notes.some(n=>n.sev==="high");
-  return(
-    <div style={{background:high?"#fef2f2":"#fffbeb",border:"1px solid "+(high?"#fca5a5":"#fcd34d"),borderRadius:8,padding:"10px 12px",marginBottom:8}}>
-      <div style={{fontWeight:700,textTransform:"uppercase",letterSpacing:".04em",fontSize:10,color:high?"#991b1b":"#92400e",marginBottom:5}}>
-        {high?"⚠ Feed integrity — matrix is not current":"Feed integrity notes"}
-      </div>
-      {notes.map(n=>(
-        <div key={n.k} style={{fontSize:11,color:high?"#7f1d1d":"#92400e",lineHeight:1.5,marginTop:3}}>
-          <b style={{fontWeight:600}}>{n.head}.</b> {n.body}
-        </div>
-      ))}
-    </div>
-  );
-}
 
 function GPUFinancialCorrelationBlock({fHist,fHistErr}){
   const[mode,setMode]=useState("quarter"); // "quarter" default per investor framing
@@ -2651,22 +2543,6 @@ function GPUFinancialCorrelationBlock({fHist,fHistErr}){
         </div>
       )}
 
-      {/* Basis-change caption. This is the single most misread thing on the
-          page: the step between the two measures looks like a price move, so
-          it is stated in plain words directly above the table rather than
-          left to a tooltip. Deliberately a neutral caption, not a red alert —
-          the data is correct, it just changed units, and an alarm here would
-          read to a customer as "this product is broken". */}
-      {!illustrative&&hasBasisChange&&basisBoundary&&(
-        <div style={{background:"#fffbeb",border:"0.5px solid #fde68a",borderRadius:6,padding:"8px 11px",marginBottom:8,fontSize:11,color:"#92400e",lineHeight:1.55}}>
-          <b style={{fontWeight:700}}>The source changed what it publishes{basisChangeDate?" on "+basisChangeDate:""}.</b>{" "}
-          Through {basisBoundary.before.label} it gave a per-vendor price range and the figure below is the{" "}
-          <b style={{fontWeight:600}}>{FIN_BASIS_LABEL[basisBoundary.from]}</b>; from {basisBoundary.after.label} it publishes a single{" "}
-          <b style={{fontWeight:600}}>{FIN_BASIS_LABEL[basisBoundary.to]}</b>. A floor is the cheapest listing of ~50 vendors; a median is the middle one,
-          so the step at the dashed line is a change of measure, <b style={{fontWeight:600}}>not a price move</b> — like-for-like, prices have been broadly flat across it.
-          Growth is left uncomputed across the change rather than reported.
-        </div>
-      )}
 
       {/* Matrix or empty */}
       {!hasAnyData?(

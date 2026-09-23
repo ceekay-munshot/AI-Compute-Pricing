@@ -304,9 +304,21 @@ Live production, `$`/GPU-hour, monthly:
 `unpricedDays: 0`, `monthsMissing: []`. August is fully populated.
 
 **Apr–Jul and Aug–Sep are not comparable.** The Jul→Aug step is a change of
-unit, not a move in the market. `GPUFeedIntegrityBanner`, `renderFinBasisRow`
-and `finBasisBoundaryIndex` exist specifically to surface this seam, and the
-dashed boundary marker renders between Jul-26 and Aug-26.
+unit, not a move in the market. `renderFinBasisRow` and `finBasisBoundaryIndex`
+surface this seam, and the dashed boundary marker renders between Jul-26 and
+Aug-26. The refusal is enforced in the data, not by any caption: growth across
+the boundary is left uncomputed and the cell reads `measure changed`, with the
+reason on hover.
+
+`GPUFeedIntegrityBanner` is gone — it was already dead (nothing rendered it),
+and the two amber captions that WERE rendered on this tab, the basis-change
+explanation and the capture-gap/staleness warning, were removed at the owner's
+request along with their model-pricing counterparts. A customer is not read a
+feed-health report. In their place the tab carries one quiet line, `Prices as of
+<date>`, from `dataQuality.latestGPUObservationDate` — the one fact a reader
+cannot do without, since a stale capture otherwise reads as today's market. The
+gap and staleness detail is still served by
+`/api/gpu-hardware-pricing-history` for anyone who needs it.
 
 Do not interpolate across the boundary, hide it, smooth it, or rewrite stored
 KV snapshots. The table above is for verifying what the live API returns — it
