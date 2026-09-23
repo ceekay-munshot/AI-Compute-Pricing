@@ -34,14 +34,17 @@
  *     the lineup, four joined, and the fourteen priced in both quarters did not
  *     move. Where too few models were priced in both to stand for the
  *     provider, the change is refused with a reason (matchedModelGrowth).
- *     Model-day view only; the usage-weighted view compares its own levels.
+ *     Model-day view only. The usage-weighted view compares the levels it
+ *     shows, measured or estimated, so its QoQ/YoY reconcile with its Avg
+ *     cells; a change resting on an estimate says so (<key>Estimated, <key>Note).
  *   - The source can change WHAT it reports: on 2026-07-10 its figure for 13
  *     Google and 10 OpenAI models fell to exactly half on one day. Every price
  *     is read, and every quarter's measure decided, by _model-price-basis.js:
  *     a quarter averages one measure only, and QoQ/YoY between quarters on
- *     different measures are refused with a reason (qoqMeasureChanged /
- *     qoqReason, yoyMeasureChanged / yoyReason) instead of being printed as a
- *     price move.
+ *     different measures compare only the models the change touched in
+ *     neither (model-day view), or are refused with a reason
+ *     (qoqMeasureChanged / qoqReason, yoyMeasureChanged / yoyReason) instead
+ *     of being printed as a price move.
  *
  * Query params:
  *   ?metric=input   (default) — pricing_prompt, scaled to per 1M tokens
@@ -54,6 +57,11 @@
  *                               provider-quarter and cells that cannot clear
  *                               the gate are withheld with a stated reason —
  *                               see _usage-weights.js for the limits.
+ *   ?group=company  (default) — one column per provider (PROVIDERS)
+ *   ?group=openness           — two columns, proprietary and open-weight,
+ *                               pooling every model of PROVIDERS plus the open
+ *                               labs in OPENNESS_EXTRA_PROVIDERS, classed per
+ *                               model by _model-openness.js. Model-day only.
  *   ?refresh=1                — bypass edge cache (diagnostic only)
  */
 
@@ -69,6 +77,7 @@ import {
 } from './_usage-weights.js';
 import { fetchMarketShare } from './_openrouter-rankings.js';
 import { withEdgeCache } from './_edge-cache.js';
+import { modelOpenness, OPENNESS_EXTRA_PROVIDERS, OPENNESS_GROUPS } from './_model-openness.js';
 import {
   BASIS_ORIGIN,
   readPrice,
@@ -195,6 +204,15 @@ function formatPct(n) {
  * showed a full grid of dashes and a "partial data" warning, intermittently,
  * on roughly one load in eight.
  */
+function slimRow(row) {
+  return {
+    model: row?.model,
+    date: row?.date,
+    pricing_prompt: row?.pricing_prompt,
+    pricing_completion: row?.pricing_completion,
+  };
+}
+
 async function fetchProvider(slug, attempts = 3) {
   const url = UPSTREAM_BASE + '?provider=' + encodeURIComponent(slug);
   let lastError = null;
@@ -213,7 +231,10 @@ async function fetchProvider(slug, attempts = 3) {
         // Parsed inside the retry loop on purpose: a truncated body throws
         // here, not at fetch, and a truncation is exactly what a retry fixes.
         const j = await r.json();
-        const rows = Array.isArray(j?.results) ? j.results : [];
+        // Only the four fields anything here reads are kept. Each upstream row
+        // carries fifteen, and the open/proprietary view holds twelve
+        // providers' histories (~50 MB of JSON) in one Worker at once.
+        const rows = Array.isArray(j?.results) ? j.results.map(slimRow) : [];
         if (rows.length) return { slug, rows, attempts: attempt };
         lastError = 'empty results array';
       }
@@ -248,19 +269,29 @@ async function fetchAllProviders(providers, batchSize = 4) {
  * excludedN, ... }, mean in $/token), plus `modelLevels`: model -> that
  * model's own mean price in the quarter on the quarter's measure, which the
  * like-for-like growth in buildMatrix compares (modelLevelsOn). Its keys are
- * exactly `models`. Computed once per request and read by
- * both weightings — the model-day average in buildMatrix and the usage-weighted
- * resolver — so the two always stand on the same measure in the same quarter.
+ * exactly `models`. `touched` holds the models the source's change of measure
+ * touched, which a comparison across that change leaves out. Computed once per
+ * request and read by both weightings — the model-day average in buildMatrix
+ * and the usage-weighted resolver — so the two always stand on the same
+ * measure in the same quarter.
+ *
+ * `columnOf(slug, model)` says which column an observation counts toward and
+ * under what model key, or null to leave it out. By default the column is the
+ * provider; the open/proprietary view (group=openness) pools every provider's
+ * models into two columns, keyed "<provider>/<model>" so two providers'
+ * same-named models stay distinct.
  *
  * A quarter holding observations from both sides of a change of measure takes
  * the measure covering most of the touched models' observations and leaves the
  * rest out, counted; untouched models always count. See _model-price-basis.js.
  */
-function providerQuarterLevels(providerResults, metric, book) {
-  const out = new Map();
+const BY_PROVIDER = (slug, model) => ({ column: slug, model });
+
+function providerQuarterLevels(providerResults, metric, book, columnOf = BY_PROVIDER) {
+  const acc = new Map();                           // column -> { tallies, byModel }
   for (const pr of providerResults) {
-    const tallies = new Map();                     // quarter -> tally
-    const byModel = new Map();                     // quarter -> model -> basis -> [sum, n]
+    // An empty provider still gets its (empty) column, as it always has.
+    if (columnOf === BY_PROVIDER && !acc.has(pr.slug)) acc.set(pr.slug, { tallies: new Map(), byModel: new Map() });
     for (const row of pr.rows) {
       // Alternate-billing SKUs are the same model sold on different terms —
       // ':batch' is ~50% off async, plus ':beta', ':thinking', ':free',
@@ -283,29 +314,52 @@ function providerQuarterLevels(providerResults, metric, book) {
       if (v === null) continue;
       const day = rowDay(row);
       if (!day) continue;
+      const at = columnOf(pr.slug, row.model);
+      if (!at) continue;
+      let a = acc.get(at.column);
+      if (!a) acc.set(at.column, (a = { tallies: new Map(), byModel: new Map() }));
       const q = quarterOf(day);
       const basis = book.basisOf(pr.slug, row.model, day);
-      addToTally(tallyFor(tallies, q), basis, v, row.model || null);
+      addToTally(tallyFor(a.tallies, q), basis, v, at.model || null);
       // The same observation, kept per model and per measure, so each model's
       // own level can be read on whichever measure the quarter resolves to.
-      if (row.model) {
-        let models = byModel.get(q);
-        if (!models) byModel.set(q, (models = new Map()));
-        let slots = models.get(row.model);
-        if (!slots) models.set(row.model, (slots = new Map()));
+      if (at.model) {
+        let models = a.byModel.get(q);
+        if (!models) a.byModel.set(q, (models = new Map()));
+        let slots = models.get(at.model);
+        if (!slots) models.set(at.model, (slots = new Map()));
         const s = slots.get(basis) || [0, 0];
         s[0] += v;
         s[1] += 1;
         slots.set(basis, s);
       }
     }
+  }
+  const out = new Map();
+  for (const [column, a] of acc) {
     const levels = new Map();
-    for (const [q, t] of tallies) {
+    for (const [q, t] of a.tallies) {
       const stat = resolveTally(t);
-      stat.modelLevels = modelLevelsOn(byModel.get(q), stat.basis);
+      stat.modelLevels = modelLevelsOn(a.byModel.get(q), stat.basis);
+      stat.touched = touchedModels(a.byModel.get(q));
       levels.set(q, stat);
     }
-    out.set(pr.slug, levels);
+    out.set(column, levels);
+  }
+  return out;
+}
+
+/**
+ * The models in one provider-quarter that a change of measure touched: every
+ * observation of a touched model carries the measure it was on (basisOf()
+ * returns null only for a model no change ever touched).
+ */
+function touchedModels(models) {
+  const out = new Set();
+  for (const [model, slots] of models || []) {
+    for (const b of slots.keys()) {
+      if (b != null) { out.add(model); break; }
+    }
   }
   return out;
 }
@@ -353,8 +407,7 @@ const MIN_MATCHED_SHARE = 0.5;
  * the models priced in both, never on the two lineup averages — which move
  * whenever a model is listed or retired, with no price changing at all.
  *
- * `cur` and `prior` are providerQuarterLevels() entries on the SAME measure;
- * the caller refuses a change of measure before asking. Each matched model
+ * `cur` and `prior` are providerQuarterLevels() entries. Each matched model
  * enters at its own mean price in each quarter, and the change is the ratio of
  * the matched models' average prices:
  *
@@ -372,27 +425,47 @@ const MIN_MATCHED_SHARE = 0.5;
  *     1M input tokens between 2025-Q3 and 2026-Q3, which alone carries a mean
  *     of % changes to +318% against +73% for the matched models' average.
  *
- * Returns { growth, matched, models, onlyNow, onlyThen }. growth is null when
- * fewer than MIN_MATCHED_MODELS, or fewer than MIN_MATCHED_SHARE of `models`,
- * were priced in both.
+ * Across a change of measure (`untouchedOnly`), only models the change touched
+ * in NEITHER quarter are matched: their figures are on the same measure on both
+ * sides, so a model the change moved cannot come back in. The share rule still
+ * counts the whole lineup, so the untouched models must be at least half of it
+ * — Google's 2026-Q3, where 13 of 29 were touched, stays refused.
+ *
+ * Returns { growth, matched, models, onlyNow, onlyThen, touched } — touched
+ * counts the models priced in both quarters that were left out for it. growth
+ * is null when fewer than MIN_MATCHED_MODELS, or fewer than MIN_MATCHED_SHARE
+ * of `models`, were matched.
  */
-function matchedModelGrowth(cur, prior) {
+function matchedModelGrowth(cur, prior, { untouchedOnly = false } = {}) {
+  const leftOut = (model) => untouchedOnly && (cur.touched.has(model) || prior.touched.has(model));
   let sumNow = 0;
   let sumThen = 0;
   let matched = 0;
+  let onlyNow = 0;
+  // Priced in both quarters but touched by the change: the models this leaves
+  // out. A model listed after the change is on its measure from day one and
+  // is simply "priced only now", like any other new listing.
+  let touched = 0;
   for (const [model, now] of cur.modelLevels) {
     const then = prior.modelLevels.get(model);
-    if (then === undefined) continue;
+    if (then === undefined) { onlyNow += 1; continue; }
+    if (leftOut(model)) { touched += 1; continue; }
     sumNow += now;
     sumThen += then;
     matched += 1;
   }
+  let onlyThen = 0;
+  for (const model of prior.modelLevels.keys()) {
+    if (!cur.modelLevels.has(model)) onlyThen += 1;
+  }
   const models = cur.modelLevels.size;
-  const out = { growth: null, matched, models, onlyNow: models - matched, onlyThen: prior.modelLevels.size - matched };
+  const out = { growth: null, matched, models, onlyNow, onlyThen, touched };
   if (matched < MIN_MATCHED_MODELS || matched < MIN_MATCHED_SHARE * models) return out;
+  // Untouched models stand on no particular measure, so across a change they
+  // compare on one; otherwise each quarter keeps its own.
   const g = basisGrowth(
-    { value: sumNow / matched, basis: cur.basis },
-    { value: sumThen / matched, basis: prior.basis },
+    { value: sumNow / matched, basis: untouchedOnly ? BASIS_ORIGIN : cur.basis },
+    { value: sumThen / matched, basis: untouchedOnly ? BASIS_ORIGIN : prior.basis },
   );
   // + 0 turns a rounded -0 (float noise on an unchanged lineup) into 0, so a
   // lineup whose prices did not move can never print as a cut.
@@ -405,16 +478,25 @@ function modelsPhrase(n) {
 }
 
 /** What a like-for-like change rests on, in words, for its tooltip. */
-function likeForLikeNote(m, nowLabel, thenLabel) {
+function likeForLikeNote(m, nowLabel, thenLabel, changeDate) {
   const outside = [];
   if (m.onlyNow) outside.push(modelsPhrase(m.onlyNow) + ' priced only in ' + nowLabel);
   if (m.onlyThen) outside.push(modelsPhrase(m.onlyThen) + ' priced only in ' + thenLabel);
-  return 'Like-for-like: the ' + modelsPhrase(m.matched) + ' priced in both ' + thenLabel +
-    ' and ' + nowLabel + ', each at its own average price in each quarter.' +
+  const lead = 'Like-for-like: the ' + modelsPhrase(m.matched) + ' priced in both ' + thenLabel +
+    ' and ' + nowLabel + ', each at its own average price in each quarter.';
+  // Across a change of measure the models it touched are left out too, and
+  // the note says so first: they are the reason this change is not simply the
+  // two averages'.
+  const acrossChange = m.touched
+    ? ' The source changed how it reports prices' + (changeDate ? ' on ' + changeDate : '') +
+      ', so the ' + modelsPhrase(m.touched) + ' that change touched ' +
+      (m.touched === 1 ? 'is' : 'are') + ' left out; the rest are reported the same way in both quarters.'
+    : '';
+  return lead + acrossChange +
     (outside.length
       ? ' ' + outside.join(' and ') + (m.onlyNow + m.onlyThen === 1 ? ' is' : ' are') +
         ' left out of the change; each quarter\'s average price still includes them.'
-      : ' No model was added or dropped between them.');
+      : (m.touched ? '' : ' No model was added or dropped between them.'));
 }
 
 /** Why a like-for-like change is blank, in words, for its tooltip. */
@@ -436,6 +518,46 @@ function tooFewMatchedReason(m, nowLabel, thenLabel) {
 }
 
 /**
+ * What a usage-weighted change resting on an estimate rests on, in words, for
+ * its tooltip. `m` is the like-for-like list-price change over the same two
+ * quarters (matchedModelGrowth), offered as a cross-check: an estimate scales
+ * the quarter's list-price AVERAGE, which a model being listed or retired
+ * moves with no price changing.
+ */
+function estimatedChangeNote(cur, prior, nowLabel, thenLabel, m) {
+  const both = cur.estimated && prior.estimated;
+  const sameRatio = both && cur.ratio === prior.ratio;
+  const which = both
+    ? 'Both are estimates: their measured values were withheld, so each is its quarter\'s ' +
+      'list-price average scaled by this provider\'s usage-weighted-to-list ratio' +
+      (sameRatio ? ' — the same ratio in both, so this change is the list-price average\'s.' : '.')
+    : (cur.estimated ? nowLabel : thenLabel) + ' is an estimate: its measured value was withheld, ' +
+      'so it is that quarter\'s list-price average scaled by this provider\'s ' +
+      'usage-weighted-to-list ratio.';
+  return 'Change between the usage-weighted prices shown for ' + thenLabel + ' and ' + nowLabel + '. ' +
+    which +
+    (m && m.growth !== null
+      ? ' For reference, the list prices of the ' + modelsPhrase(m.matched) + ' priced in both ' +
+        'quarters moved ' + formatPct(m.growth) + ' like-for-like.'
+      : '');
+}
+
+/** Why a change has nothing to compare against, in words, for its tooltip. */
+function noComparatorReason(thenKey, earliestQuarter) {
+  const then = periodLabel(thenKey);
+  return thenKey < earliestQuarter
+    ? 'Not computed: there is no ' + then + ' to compare against — the source\'s price ' +
+      'history starts in ' + periodLabel(earliestQuarter) + '.'
+    : 'Not computed: ' + then + ' has no price for this provider to compare against.';
+}
+
+/** The date of the change of measure between two quarters' levels, or null. */
+function changeDateOf(cur, prior) {
+  const dated = [cur?.basis, prior?.basis].filter(b => b && b !== BASIS_ORIGIN).sort();
+  return dated[dated.length - 1] || null;
+}
+
+/**
  * Build the matrix from each provider's quarter levels (providerQuarterLevels).
  *
  * Default (weighting omitted): the average is equal-weighted across every
@@ -449,7 +571,13 @@ function tooFewMatchedReason(m, nowLabel, thenLabel) {
  * gate are withheld. The equal-weighted level is retained on every cell as
  * `equalAvg` so the two are always comparable side by side.
  */
-function buildMatrix(levelsBySlug, weighting, events) {
+function buildMatrix(levelsBySlug, weighting, events, columns = PROVIDERS) {
+  // Each cell's unrounded level ($/1M) — the one shown, and the list-price
+  // one — for the estimate and growth passes. The cells carry levels rounded
+  // to $0.001, which is 2% of Mistral's $0.049: a change divided from those
+  // can be off by more than a point.
+  const exact = new WeakMap();
+  const exactEqual = new WeakMap();
   // Collect the union of quarter keys across providers
   const allQuarters = new Set();
   for (const levels of levelsBySlug.values()) {
@@ -461,7 +589,7 @@ function buildMatrix(levelsBySlug, weighting, events) {
 
   // Build output rows (one row per quarter)
   const rows = quarters.map(q => {
-    const cells = PROVIDERS.map(p => {
+    const cells = columns.map(p => {
       const stat = levelsBySlug.get(p.slug)?.get(q);
       if (!stat || stat.mean === null) {
         return { slug: p.slug, avg: null, avgLabel: '—', obsCount: 0, modelCount: 0 };
@@ -482,6 +610,8 @@ function buildMatrix(levelsBySlug, weighting, events) {
         // out rather than blended in. 0 almost everywhere.
         basisExcludedObs: stat.excludedN,
       };
+      exact.set(cell, equalAvg);
+      exactEqual.set(cell, equalAvg);
       if (!weighting) return cell;
 
       // Usage-weighted view. `avg` is deliberately REPLACED rather than added
@@ -500,6 +630,8 @@ function buildMatrix(levelsBySlug, weighting, events) {
       cell.equalAvgLabel = cell.avgLabel;
       cell.avg = weightedAvg === null ? null : round3(weightedAvg);
       cell.avgLabel = weightedAvg === null ? '—' : formatPrice(weightedAvg);
+      if (weightedAvg === null) exact.delete(cell);
+      else exact.set(cell, weightedAvg);
       cell.weightedModelCount = w.models;
       cell.coverage = w.coverage === null ? null : round3(w.coverage);
       cell.coverageLabel = w.coverage === null ? null : (w.coverage * 100).toFixed(0) + '%';
@@ -556,7 +688,7 @@ function buildMatrix(levelsBySlug, weighting, events) {
       for (const c of row.cells) {
         if (!(c.equalAvg > 0)) continue;
         if (c.avg !== null) {
-          const r = c.avg / c.equalAvg;
+          const r = exact.get(c) / exactEqual.get(c);
           if (isFinite(r) && r > 0) {
             if (!measured.has(c.slug)) measured.set(c.slug, []);
             measured.get(c.slug).push(r);
@@ -584,7 +716,8 @@ function buildMatrix(levelsBySlug, weighting, events) {
         else if (prov && prov.length) { ratio = mean(prov); basis = 'provisional-ratio'; }
         else if (peer) { ratio = peer; basis = 'peer-ratio'; }
         if (!ratio) continue;
-        const est = c.equalAvg * ratio;
+        const est = exactEqual.get(c) * ratio;
+        exact.set(c, est);
         c.estimateAvg = round3(est);
         c.estimateAvgLabel = formatPrice(est);
         c.estimateBasis = basis;
@@ -594,54 +727,94 @@ function buildMatrix(levelsBySlug, weighting, events) {
   }
 
   // Attach QoQ / YoY per cell (against same provider, adjacent periods).
-  // Null-safe: if the comparison quarter is absent or has null avg, leave null.
   //
   // In the model-day view the change is LIKE-FOR-LIKE (matchedModelGrowth):
   // measured on the models priced in both quarters, never on the two lineup
   // averages, so a model listed or retired between them is not a price move.
   // The level stays the whole lineup's average. Where too few models were
-  // priced in both, the change is refused with a reason instead. The
-  // usage-weighted view still compares its own weighted levels: what the
-  // market paid does move when it buys a different mix.
+  // priced in both, the change is refused with a reason instead.
+  //
+  // The usage-weighted view compares the levels it SHOWS: what the market paid
+  // does move when it buys a different mix. Where a quarter's measured value
+  // was withheld, the Avg view shows its estimate, and the change is taken
+  // from that same figure — otherwise QoQ/YoY sat blank under an Avg row with
+  // every cell filled (29 of 40 cells on 2026-09-24), and the two views of one
+  // series disagreed. A change resting on an estimate says so
+  // (<key>Estimated, <key>Note), with the like-for-like list-price change
+  // beside it as a cross-check.
   //
   // Whether two quarters can be compared at all is decided in ONE place,
-  // _model-price-basis.js: quarters on different measures are refused, and
-  // the cell carries the reason instead of the difference. At provider level
-  // the rule is "any", not "most": a quarter is on the changed measure if ANY
-  // model in it was touched by the change. One touched $1.25 model among
-  // cheap untouched ones carries most of an equal-weighted $/token mean, so
-  // there is no share of touched models below which the move stops being the
-  // artefact — Google's -19.5% for 2026-Q3 was 13 of its 29 models.
+  // _model-price-basis.js: a quarter is on the changed measure if ANY model in
+  // it was touched by the change, and the difference of two levels on
+  // different measures is refused — one touched $1.25 model among cheap
+  // untouched ones carries most of an equal-weighted $/token mean, so there is
+  // no share of touched models below which that difference stops being the
+  // artefact (Google's -19.5% for 2026-Q3 was 13 of its 29 models). The
+  // model-day view can still measure the change like-for-like on the models
+  // the change touched in neither quarter, when those are at least half the
+  // lineup; the weighted view has no per-model split to fall back on, so there
+  // the change stays refused.
   const rowByQuarter = new Map(rows.map(r => [r.quarter, r]));
-  const level = (c) => (c && c.avg !== null ? { value: c.avg, basis: c.basis } : null);
+  const earliestQuarter = quarters[quarters.length - 1];
+  const level = (c) => {
+    if (!c) return null;
+    if (c.avg !== null) return { value: exact.get(c) ?? c.avg, basis: c.basis, estimated: false };
+    if (weighting && c.estimateAvg != null) {
+      return { value: exact.get(c) ?? c.estimateAvg, basis: c.basis, estimated: true, ratio: c.estimateRatio };
+    }
+    return null;
+  };
   for (const row of rows) {
     row.cells.forEach((cell, idx) => {
       const stats = levelsBySlug.get(cell.slug);
       const cur = level(cell);
+      const nowLabel = periodLabel(row.quarter);
       // For each of qoq (the prior quarter) and yoy (the same quarter a year
       // earlier) this writes <key> and <key>Label, and where they apply
       // <key>MeasureChanged + <key>Reason (a change of measure),
       // <key>MatchedModels (models priced in both quarters),
-      // <key>TooFewMatched + <key>Reason (refused: too few of them), or
-      // <key>Note (what a like-for-like figure rests on).
+      // <key>TooFewMatched + <key>Reason (refused: too few of them),
+      // <key>Estimated (usage-weighted: a side is an estimate),
+      // <key>Reason alone (nothing to compare against), or
+      // <key>Note (what a figure rests on).
       for (const [key, then] of [['qoq', priorQuarter(row.quarter)], ['yoy', yearAgoQuarter(row.quarter)]]) {
+        const thenLabel = periodLabel(then);
         const prior = level(rowByQuarter.get(then)?.cells?.[idx]);
         let growth = basisGrowth(cur, prior);
-        if (isMeasureChange(cur, prior)) {
-          // Refused before any model is matched: a model the change moved
-          // cannot come back in through the like-for-like path.
-          cell[key + 'MeasureChanged'] = true;
-          cell[key + 'Reason'] = measureChangeReason(cur, prior, periodLabel(then), events);
+        if (cur && !prior) {
+          cell[key + 'Reason'] = noComparatorReason(then, earliestQuarter);
+        } else if (isMeasureChange(cur, prior)) {
+          const m = weighting
+            ? null
+            : matchedModelGrowth(stats.get(row.quarter), stats.get(then), { untouchedOnly: true });
+          if (m && m.growth !== null) {
+            growth = m.growth;
+            cell[key + 'MatchedModels'] = m.matched;
+            cell[key + 'Note'] = likeForLikeNote(m, nowLabel, thenLabel, changeDateOf(cur, prior));
+          } else {
+            // Refused: a model the change moved cannot come back in, and too
+            // few it left alone remain to stand for the lineup.
+            cell[key + 'MeasureChanged'] = true;
+            cell[key + 'Reason'] = measureChangeReason(cur, prior, thenLabel, events) +
+              (m ? ' Measuring it on the models the change did not touch was tried: ' +
+                (m.matched === 1 ? 'only 1 of them was' : 'only ' + m.matched + ' of them were') +
+                ' priced in both quarters, against ' + m.models + ' models priced in ' + nowLabel +
+                ' — too few to stand for the lineup.' : '');
+          }
         } else if (growth !== null && !weighting) {
           const m = matchedModelGrowth(stats.get(row.quarter), stats.get(then));
           growth = m.growth;
           cell[key + 'MatchedModels'] = m.matched;
           if (growth === null) {
             cell[key + 'TooFewMatched'] = true;
-            cell[key + 'Reason'] = tooFewMatchedReason(m, periodLabel(row.quarter), periodLabel(then));
+            cell[key + 'Reason'] = tooFewMatchedReason(m, nowLabel, thenLabel);
           } else {
-            cell[key + 'Note'] = likeForLikeNote(m, periodLabel(row.quarter), periodLabel(then));
+            cell[key + 'Note'] = likeForLikeNote(m, nowLabel, thenLabel);
           }
+        } else if (growth !== null && (cur.estimated || prior.estimated)) {
+          cell[key + 'Estimated'] = true;
+          const m = matchedModelGrowth(stats.get(row.quarter), stats.get(then));
+          cell[key + 'Note'] = estimatedChangeNote(cur, prior, nowLabel, thenLabel, m);
         }
         cell[key] = growth;
         cell[key + 'Label'] = formatPct(growth);
@@ -651,6 +824,10 @@ function buildMatrix(levelsBySlug, weighting, events) {
 
   return { quarters: rows };
 }
+
+// Exported for the growth tests, which drive the usage-weighted path with
+// synthetic weights; the route itself exports only its handlers.
+export { buildMatrix };
 
 /** Mark the current calendar quarter (UTC) as partial in the response. */
 function currentQuarterKey() {
@@ -831,6 +1008,32 @@ function mergeProviderWeeks(captured, live) {
   };
 }
 
+/**
+ * For the open/proprietary footnote: per side, the labs contributing a priced
+ * model and how many models each, over the whole history. Alternate-billing
+ * SKUs and unpriced rows are left out, as they are from the averages.
+ */
+function opennessSummary(results, metric) {
+  const label = new Map([...PROVIDERS, ...OPENNESS_EXTRA_PROVIDERS].map(p => [p.slug, p.label]));
+  const sides = new Map(OPENNESS_GROUPS.map(g => [g.slug, new Map()]));
+  for (const pr of results) {
+    for (const row of pr.rows) {
+      if (typeof row?.model !== 'string' || isAltBillingSku(row.model)) continue;
+      if (readPrice(row, metric) === null) continue;
+      const labs = sides.get(modelOpenness(pr.slug, row.model));
+      if (!labs.has(pr.slug)) labs.set(pr.slug, new Set());
+      labs.get(pr.slug).add(row.model);
+    }
+  }
+  return OPENNESS_GROUPS.map(g => ({
+    slug: g.slug,
+    label: g.label,
+    labs: [...sides.get(g.slug)]
+      .map(([slug, models]) => ({ slug, label: label.get(slug) || slug, models: models.size }))
+      .sort((a, b) => b.models - a.models),
+  }));
+}
+
 export async function onRequestGet(context) {
   const { request } = context;
   const url = new URL(request.url);
@@ -838,17 +1041,28 @@ export async function onRequestGet(context) {
   if (metric !== 'input' && metric !== 'output') {
     return jsonResp({ success: false, error: 'metric must be "input" or "output"' }, 400);
   }
+  const group = (url.searchParams.get('group') || 'company').toLowerCase();
+  if (group !== 'company' && group !== 'openness') {
+    return jsonResp({ success: false, error: 'group must be "company" or "openness"' }, 400);
+  }
   const weight = (url.searchParams.get('weight') || 'equal').toLowerCase();
   if (weight !== 'equal' && weight !== 'usage') {
     return jsonResp({ success: false, error: 'weight must be "equal" or "usage"' }, 400);
   }
+  // The usage weighting certifies each provider-quarter against that
+  // provider's own OpenRouter total, and a provider's total cannot be split
+  // into its open and proprietary models, so the open/proprietary view is
+  // model-day only. Refused rather than quietly answered in model-day terms.
+  if (group === 'openness' && weight === 'usage') {
+    return jsonResp({ success: false, error: 'group=openness is available with weight=equal only' }, 400);
+  }
 
   // Validation runs OUTSIDE the cache so a 400 is never stored.
   //
-  // Both metric and weight go in the key. They are the only two parameters this
-  // handler reads (verified: searchParams appears exactly twice in this file),
-  // and each changes every figure in the body — a key that dropped one would
-  // hand a reader the other question's numbers, plausibly and with no error.
+  // metric, weight and group all go in the key. They are the only parameters
+  // this handler reads, and each changes every figure in the body — a key that
+  // dropped one would hand a reader another question's numbers, plausibly and
+  // with no error.
   // The client's cache-busting b=<build hash> is deliberately NOT in the key:
   // it does not affect the body, and anything a caller can set freely would let
   // one request per distinct value trigger another ~35 MB upstream fan-out.
@@ -858,8 +1072,8 @@ export async function onRequestGet(context) {
     // browser max-age pinned whatever a tab first loaded, and let two tabs
     // opened minutes apart disagree. With the edge cache in front, that
     // revalidation now costs ~80 ms instead of a full fan-out.
-    { params: { metric, weight }, ttl: CACHE_TTL, browserTtl: 0 },
-    () => buildProviderMatrix(request, metric, weight),
+    { params: { metric, weight, group }, ttl: CACHE_TTL, browserTtl: 0 },
+    () => buildProviderMatrix(request, metric, weight, group),
   );
 }
 
@@ -867,8 +1081,12 @@ export async function onRequestGet(context) {
  * The real work: eight upstream providers, ~35 MB downloaded to produce ~6.6 KB.
  * Runs only on an edge-cache miss now, where it used to run on every request.
  */
-async function buildProviderMatrix(request, metric, weight) {
-  const results = await fetchAllProviders(PROVIDERS);
+async function buildProviderMatrix(request, metric, weight, group = 'company') {
+  const openness = group === 'openness';
+  // The open/proprietary view also reads the open labs that have no company
+  // column — without Qwen, Kimi, GLM and MiniMax the open-weight side would be
+  // mostly DeepSeek and Llama. ~15 MB more upstream, on this view only.
+  const results = await fetchAllProviders(openness ? [...PROVIDERS, ...OPENNESS_EXTRA_PROVIDERS] : PROVIDERS);
   const anyRows = results.some(r => r.rows.length);
   if (!anyRows) {
     return jsonResp({
@@ -882,7 +1100,10 @@ async function buildProviderMatrix(request, metric, weight) {
   // request's own rows (see _model-price-basis.js), and every
   // provider-quarter's level on one measure. Both weightings read these.
   const book = buildBasisBook(results, metric);
-  const levels = providerQuarterLevels(results, metric, book);
+  const levels = openness
+    ? providerQuarterLevels(results, metric, book, (slug, model) =>
+        ({ column: modelOpenness(slug, model), model: slug + '/' + model }))
+    : providerQuarterLevels(results, metric, book);
 
   // Usage weighting needs two separate captures: per-model tokens for the
   // weights, and per-provider totals for the coverage denominator. If either
@@ -955,7 +1176,8 @@ async function buildProviderMatrix(request, metric, weight) {
     };
   }
 
-  const { quarters } = buildMatrix(levels, weighting, book.events);
+  const columns = openness ? OPENNESS_GROUPS : PROVIDERS;
+  const { quarters } = buildMatrix(levels, weighting, book.events, columns);
   const currentQ = currentQuarterKey();
   quarters.forEach(q => { q.partial = q.quarter === currentQ; });
 
@@ -981,9 +1203,23 @@ async function buildProviderMatrix(request, metric, weight) {
     degraded,
     metric,
     weight,
+    group,
     weighting: weightMeta,
     source: UPSTREAM_BASE,
-    sourceNote: weight === 'usage'
+    // Which labs each side of the open/proprietary view draws on, for the
+    // footnote. Classified per model, see _model-openness.js.
+    openness: openness ? opennessSummary(results, metric) : undefined,
+    sourceNote: openness
+      ? 'Upstream is pricepertoken.com\'s own historical pricing API, read for ' +
+        [...PROVIDERS, ...OPENNESS_EXTRA_PROVIDERS].length + ' labs. Each model is ' +
+        'classed open-weight (its weights are published to download, under any ' +
+        'licence) or proprietary (API-only), and each side is averaged ' +
+        'equal-weighted across every (model, day) observation in the quarter. ' +
+        'QoQ/YoY are like-for-like over the models priced in both quarters, as in ' +
+        'the by-company view; across the source\'s change of measure they compare ' +
+        'only the models it did not touch, and are not computed where those are ' +
+        'fewer than half of the quarter\'s models.'
+      : weight === 'usage'
       ? 'Prices come from pricepertoken.com\'s historical pricing API; weights ' +
         'come from OpenRouter\'s weekly per-model token volumes. Each model\'s ' +
         'mean price in the quarter is weighted by the tokens it served, so the ' +
@@ -992,9 +1228,10 @@ async function buildProviderMatrix(request, metric, weight) {
         'Where a ratio of usage-weighted to list price exists to scale from, the ' +
         'cell carries an estimate instead: the quarter\'s list-price average ' +
         'times that ratio, reported with its basis and the reason the ' +
-        'measurement was withheld. Where the source changed ' +
-        'what it reports, each quarter averages one measure only and QoQ/YoY across ' +
-        'the change are not computed.'
+        'measurement was withheld. QoQ/YoY compare the figures shown, measured ' +
+        'or estimated; a change resting on an estimate says so. Where the source ' +
+        'changed what it reports, each quarter averages one measure only and ' +
+        'QoQ/YoY across the change are not computed.'
       : 'Upstream is pricepertoken.com\'s own historical pricing API. ' +
         'Per-provider daily model prices are averaged equal-weighted across ' +
         'every (model, day) observation in each calendar quarter. No synthetic ' +
@@ -1004,7 +1241,9 @@ async function buildProviderMatrix(request, metric, weight) {
         'not read as a price move; they are not computed where fewer than two ' +
         'models, or fewer than half of the quarter\'s models, were priced in ' +
         'both. Where the source changed what it reports, each quarter averages ' +
-        'one measure only and QoQ/YoY across the change are not computed.',
+        'one measure only, and QoQ/YoY across the change compare only the models ' +
+        'it did not touch — not computed where those are fewer than half the ' +
+        'quarter\'s models.',
     earliestDateObserved: earliestDate ? earliestDate.slice(0, 10) : null,
     // Every day on which the source changed what it reports, found from this
     // response's own rows, and the plain-words caption the matrix shows for
@@ -1013,7 +1252,7 @@ async function buildProviderMatrix(request, metric, weight) {
       events: book.events,
       summary: describeMeasureBreaks([book.events], slug => PROVIDERS.find(p => p.slug === slug)?.label || slug),
     },
-    providers: PROVIDERS,
+    providers: columns,
     quarters,
     providerErrors: results.filter(r => r.error).map(r => ({ slug: r.slug, error: r.error, attempts: r.attempts })),
     // Providers that needed more than one attempt. Zero here is the healthy
