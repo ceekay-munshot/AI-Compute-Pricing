@@ -949,6 +949,15 @@ function ModelPricingHistoryBlock(){
                           :"";
                       }
                     }
+                    // Under QoQ/YoY the sub-line falls back to the LEVEL whenever
+                    // there is no matched-model count to show (growthSub above), which
+                    // is exactly the case for a cell whose growth was refused as a
+                    // change of measure. That level is a price like any other, so it
+                    // takes the post-change dagger. The mark used to render only in
+                    // the Avg view while MeasureBreakCaption promised it in all three,
+                    // so under QoQ/YoY the caption pointed at a marker nothing drew —
+                    // on the very cells the caption is about.
+                    const subIsLevel=view!=="avg"&&matched==null;
                     // Grey marks an EMPTY cell, not an estimated one. An estimate is
                     // rendered in the measured colour at the owner's explicit
                     // direction, so it cannot be read as weaker data on a slide.
@@ -980,7 +989,7 @@ function ModelPricingHistoryBlock(){
                       <td key={c.slug} style={{padding:"10px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",textAlign:"right",fontWeight:600,color,whiteSpace:"nowrap"}}
                           title={refusedWhy||[growthWhy,tip,afterChangeTitle(afterChange?c.basis:null,c.basisExcludedObs)].filter(Boolean).join(" · ")}>
                         <div>{main}{view==="avg"&&afterChange&&main!=="—"&&afterChangeMark()}</div>
-                        <div style={{fontSize:9,color:withheld&&!showEst?"#d1d5db":"#9ca3af",fontWeight:400,marginTop:1}}>{sub}</div>
+                        <div style={{fontSize:9,color:withheld&&!showEst?"#d1d5db":"#9ca3af",fontWeight:400,marginTop:1}}>{sub}{subIsLevel&&afterChange&&sub&&sub!=="—"&&afterChangeMark()}</div>
                       </td>
                     );
                   })}
