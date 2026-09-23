@@ -493,7 +493,9 @@ function buildMatrix(levelsBySlug, weighting, events) {
       const coverage = weighting.coverage.get(q)?.has(p.slug)
         ? weighting.coverage.get(q).get(p.slug)
         : null;
-      const w = weightedAverage(modelWeights, coverage, weighting.seriesAvailable);
+      const w = weightedAverage(
+        modelWeights, coverage, weighting.seriesAvailable, weighting.seriesGate,
+      );
       const weightedAvg = w.avg === null ? null : w.avg * 1_000_000;
 
       cell.equalAvg = cell.avg;
@@ -804,6 +806,27 @@ function overlayRichModelWeeks(chartSeries, richSeries, metric) {
 }
 
 /** Latest week start in a {weeks:[{start}]} payload, or null. */
+/* How many whole ISO weeks a week-start is behind the current one. Weekly
+   captures normally sit 0-1 weeks back (the current week is still filling), so
+   the threshold allows a couple of missed runs before it counts as abandoned.
+   Infinity when there is no week at all, which reads as maximally stale. */
+const MAX_PROVIDER_SERIES_WEEKS_BEHIND = 3;
+
+function currentIsoWeekStart() {
+  const d = new Date();
+  const dow = (d.getUTCDay() + 6) % 7; // Mon=0
+  const mondayMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - dow * 86400000;
+  return new Date(mondayMs).toISOString().slice(0, 10);
+}
+
+function weeksBehindIsoWeek(weekStart) {
+  if (!weekStart) return Infinity;
+  const a = Date.parse(weekStart + 'T00:00:00Z');
+  const b = Date.parse(currentIsoWeekStart() + 'T00:00:00Z');
+  if (!isFinite(a) || !isFinite(b)) return Infinity;
+  return Math.round((b - a) / (7 * 86400000));
+}
+
 function lastWeekStart(series) {
   const weeks = series?.weeks;
   if (!Array.isArray(weeks) || !weeks.length) return null;
@@ -912,6 +935,19 @@ async function buildProviderMatrix(request, metric, weight) {
     ]);
     const liveOk = !!liveProviders && Array.isArray(liveProviders.weeks);
     const providerSeries = mergeProviderWeeks(capturedProviders, liveOk ? liveProviders : null);
+    // The captured provider series is a FALLBACK, and on 2026-09-23 it was 15
+    // weeks behind: google-dash's provider capture last persisted on
+    // 2026-06-09 and has recorded no error since, so nothing upstream will
+    // report it. That costs nothing while the live read works, because
+    // mergeProviderWeeks puts live weeks on top and the captured copy only
+    // supplies history the live dataset does not reach (it starts 2025-09-22).
+    // But when the live read FAILS, the weighting silently fell back to those
+    // stale totals and divided this quarter's spend by a months-old share,
+    // with nothing on screen saying so. Refuse instead.
+    const providerCapturedLatest = lastWeekStart(capturedProviders);
+    const providerWeeksBehind = weeksBehindIsoWeek(providerCapturedLatest);
+    const providerSeriesStale = !liveOk
+      && providerWeeksBehind > MAX_PROVIDER_SERIES_WEEKS_BEHIND;
     const { series: modelSeries, richWeeks } =
       overlayRichModelWeeks(chartSeries, richSeries, metric);
 
@@ -921,8 +957,15 @@ async function buildProviderMatrix(request, metric, weight) {
     // Both series are required. Without the model series there are no weights;
     // without the provider series there is no denominator to certify them
     // against. Either way the weighted view has nothing it can honestly say.
-    const seriesAvailable = !!modelSeries && !!providerSeries;
-    weighting = { weights: built.weights, coverage: built.coverage, seriesAvailable };
+    const seriesAvailable = !!modelSeries && !!providerSeries && !providerSeriesStale;
+    weighting = {
+      weights: built.weights,
+      coverage: built.coverage,
+      seriesAvailable,
+      // Which refusal it is, so the cell can say the true reason rather than
+      // claiming the series could not be loaded when it loaded and was stale.
+      seriesGate: providerSeriesStale ? 'provider-series-stale' : 'series-unavailable',
+    };
     weightMeta = {
       source: 'weights from openrouter.ai/rankings weekly token series; provider totals ' +
         'read live from the market-share dataset, merged over the captured history',
@@ -930,7 +973,12 @@ async function buildProviderMatrix(request, metric, weight) {
       providerSeriesAvailable: !!providerSeries,
       providerSeriesLive: liveOk,
       providerSeriesLiveError: liveOk ? null : (liveProviders?.error || 'unavailable'),
-      providerSeriesCapturedLatestWeek: lastWeekStart(capturedProviders),
+      providerSeriesCapturedLatestWeek: providerCapturedLatest,
+      providerSeriesCapturedWeeksBehind:
+        Number.isFinite(providerWeeksBehind) ? providerWeeksBehind : null,
+      // True only when the live read failed AND the fallback is too old to
+      // stand in for it. Not "the capture is stale" — that alone is harmless.
+      providerSeriesStale,
       // Weeks whose weights came from the full ~500-model catalogue rather
       // than the top-9 chart. Coverage on these is not capped by the chart,
       // and input/output are weighted by prompt/completion tokens separately.
