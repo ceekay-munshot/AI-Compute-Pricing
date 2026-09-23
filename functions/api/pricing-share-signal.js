@@ -66,13 +66,14 @@ const CORS = {
 
 const CACHE_TTL = 600; // 10 min
 
-function jsonResp(obj, status = 200) {
+function jsonResp(obj, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(obj), {
     status,
     headers: {
       'Content-Type': 'application/json',
       'Cache-Control': 'public, max-age=' + CACHE_TTL,
       ...CORS,
+      ...extraHeaders,
     },
   });
 }
@@ -168,6 +169,11 @@ function classifyShare(deltaPP) {
 // A provider whose price change the matrix refused because the source changed
 // what it reports between the two quarters. Deliberately outside the 3x3
 // table: no price regime applies, so no read-through is claimed.
+const TOO_FEW_MATCHED_REGIME = {
+  label: 'Too few models to compare',
+  note: 'The provider\'s lineup changed too much between the two quarters for a like-for-like price change, so none is computed and no price read is made.',
+};
+
 const MEASURE_CHANGED_REGIME = {
   label: 'Price measure changed',
   note: 'The source changed how it reports this provider\'s prices between the two quarters, so the price change is not computed and no price read is made.',
@@ -215,6 +221,15 @@ export async function onRequestGet({ request }) {
   if (!history || !history.success) {
     return jsonResp({ success: false, error: 'canonical history unavailable' }, 502);
   }
+
+  // The matrix fans out to eight providers and reports `degraded` when any of
+  // them came back with an error; it marks its OWN response no-store so a
+  // partial answer is never replayed. This endpoint used to check only
+  // `success`, so a provider that failed simply had no cells, was dropped
+  // silently below, and the callouts were then ranked over the survivors --
+  // published for ten minutes as if the fan-out had been whole.
+  const pricingDegraded = pricing.degraded === true;
+  const pricingProviderErrors = pricing.providerErrors || null;
 
   // ── Which days count (see uncountedReason) ──
   const counted = []; // { q, rows } — rows in rank order
@@ -284,9 +299,15 @@ export async function onRequestGet({ request }) {
       const slug = c.slug;
       if (typeof c.avg !== 'number') continue;
       const priorCell = (priorQuarter && priorQuarter.cells.find(x => x.slug === slug)) || null;
-      // Refused by the matrix (see _model-price-basis.js). Never read as a
-      // number, even if one were present.
-      const priceRefused = c.qoqMeasureChanged === true;
+      // Refused by the matrix, for EITHER of its two reasons -- a change of
+      // measure (_model-price-basis.js) or too few models priced in both
+      // quarters to be like-for-like. Never read as a number, even if one
+      // were present. Only the first was handled here, so a too-few-matched
+      // provider fell through every bucket below: off the chart, out of the
+      // table, and absent from the notes that exist to name who was left out.
+      const measureChanged = c.qoqMeasureChanged === true;
+      const tooFewMatched  = c.qoqTooFewMatched === true;
+      const priceRefused   = measureChanged || tooFewMatched;
       const priceQoq = (!priceRefused && typeof c.qoq === 'number') ? c.qoq : null;
 
       const shareAvg = shareNow && shareNow.get(slug);
@@ -299,9 +320,13 @@ export async function onRequestGet({ request }) {
       // quarter) are skipped — being explicit about what we don't know.
       if (typeof shareAvg !== 'number') continue;
 
-      const priceReg = priceRefused ? 'measure_changed' : classifyPrice(priceQoq);
+      const priceReg = measureChanged ? 'measure_changed'
+        : tooFewMatched ? 'too_few_matched'
+        : classifyPrice(priceQoq);
       const shareReg = classifyShare(shareQoqPP);
-      const regime   = priceRefused ? MEASURE_CHANGED_REGIME : regimeFor(priceReg, shareReg);
+      const regime   = measureChanged ? MEASURE_CHANGED_REGIME
+        : tooFewMatched ? TOO_FEW_MATCHED_REGIME
+        : regimeFor(priceReg, shareReg);
 
       rows.push({
         slug,
@@ -309,9 +334,16 @@ export async function onRequestGet({ request }) {
         avg: c.avg,
         avgLabel: c.avgLabel,
         priceQoq,
-        priceQoqLabel: priceRefused ? 'measure changed'
+        priceQoqLabel: measureChanged ? 'measure changed'
+          : tooFewMatched ? 'too few models'
           : (typeof priceQoq === 'number') ? ((priceQoq >= 0 ? '+' : '') + (priceQoq * 100).toFixed(1) + '%') : '—',
-        priceMeasureChanged: priceRefused,
+        priceRefused,
+        priceRefusedKind: measureChanged ? 'measure_changed' : tooFewMatched ? 'too_few_matched' : null,
+        // Retained so a reader written against the older shape keeps working:
+        // it still means "the source changed what it reports", not "refused".
+        priceMeasureChanged: measureChanged,
+        // The matrix's own wording for the refusal, whichever it was. The
+        // too-few-matched reason used to be computed upstream and discarded.
         priceQoqReason: priceRefused ? (c.qoqReason || null) : null,
         priceReg,
         shareAvg,
@@ -352,12 +384,12 @@ export async function onRequestGet({ request }) {
     // this, "Strongest pricing power" (which only asks "not a cut") would
     // crown a provider whose price move is unknown.
     const r = latestObj.rows.filter(x =>
-      !x.priceMeasureChanged && typeof x.priceQoq === 'number' && typeof x.shareQoqPP === 'number');
+      !x.priceRefused && typeof x.priceQoq === 'number' && typeof x.shareQoqPP === 'number');
     // The share callout needs only a share change. A provider whose price
     // change was refused still gained or lost share, and its detail says the
     // price change is not computed instead of quoting one.
     const shareRows = latestObj.rows.filter(x =>
-      typeof x.shareQoqPP === 'number' && (typeof x.priceQoq === 'number' || x.priceMeasureChanged));
+      typeof x.shareQoqPP === 'number' && (typeof x.priceQoq === 'number' || x.priceRefused));
 
     const by = (fn) => [...r].sort(fn);
 
@@ -407,11 +439,19 @@ export async function onRequestGet({ request }) {
       detail: 'Price ' + disconnect.priceQoqLabel + ' but share ' + disconnect.shareQoqLabel,
     });
 
+    // Ranking "biggest cut" or "strongest gainer" over whoever survived a
+    // partial fan-out can crown the wrong provider outright, so no callout is
+    // made until the matrix is whole again.
+    if (pricingDegraded) callouts = [];
     callouts = callouts.slice(0, 5);
   }
 
   return jsonResp({
     success: true,
+    // True when the upstream matrix could not reach every provider. The rows
+    // below are then a subset and no callouts are made.
+    degraded: pricingDegraded,
+    providerErrors: pricingProviderErrors,
     latestComparable,
     priorComparable: priorQuarterKey(latestComparable),
     quarters: allQuarterRows,
@@ -435,8 +475,9 @@ export async function onRequestGet({ request }) {
       'Not counted: gap-fill copies of a later capture, and days whose stored list is not a complete model ranking. ' +
       'A provider with no model in the top ' + depth + ' on any counted day of a quarter has no share for it, never an imputed one. ' +
       'Where the source changed how it reports a provider\'s prices between the two quarters, ' +
+      'or where too few of its models were priced in both quarters to compare like for like, ' +
       'that provider\'s price change is not computed and it makes no price callout.',
-  });
+  }, 200, pricingDegraded ? { 'Cache-Control': 'no-store' } : {});
 }
 
 export async function onRequestOptions() {

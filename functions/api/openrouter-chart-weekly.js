@@ -12,7 +12,8 @@
  *
  * Source of truth is HISTORY_KV (`or-chart:series` for models,
  * `or-chart:providers` for providers), refreshed by the scheduled browser
- * capture (.github/workflows/openrouter-capture.yml). The bundled seed
+ * capture that runs in the google-dash repo (this repo has no .github
+ * directory and never writes). The bundled seed
  * (_openrouter-chart-seed.js) is a bootstrap / emergency fallback only —
  * persisted captures always override and extend it.
  *

@@ -166,11 +166,14 @@ repo has deliberately moved first, and they are all presentation:
   it does not change the body and a caller-controlled key component would let
   each distinct value trigger another fan-out. The cache is per-PoP, so the
   first reader in each region still pays cold cost.
-- **Two client fetches key on the build hash instead of the clock.** The peer
-  matrix answers with `max-age=86400` and never got to use it, because the old
+- **Three client fetches key on the build hash instead of the clock.** The old
   `?v=<5-minute bucket>` minted a new URL every five minutes: 13 ms from browser
   cache inside a bucket, 3,513 ms the moment it rolled over, for data that
-  changes daily.
+  changes daily. The hash reaches the BROWSER cache only: `_edge-cache.js`
+  builds its key from the named params plus `CACHE_SCHEMA` and deliberately
+  ignores `b`, so a caller cannot trigger an upstream fan-out. Bump
+  `CACHE_SCHEMA` to invalidate the edge. The peer matrix sets `max-age=3600`
+  internally, which the edge wrapper rewrites to the `browserTtl` it is given.
 
 - **The page auto-refreshes and the cache lifetimes are shorter.** google-dash
   fetches once on mount and never again. It also caches the provider matrix
@@ -378,12 +381,17 @@ index.html         committed pre-built artifact — regenerate, never hand-edit
 scripts/build-dashboard.mjs  the splicer
 ```
 
-`js/dashboard.jsx` is google-dash's lines 1-208 and 270-3555 spliced verbatim —
-they occupy lines 1-208 and 209-3504 here — plus `PPTHistoryIframe` from its
-lines 4950-4970, a second out-of-range splice taken so the pricing-history chart
-could travel with the block it belongs to. The hand-written code is `App()` and
+`js/dashboard.jsx` began as a verbatim splice of google-dash's dashboard source,
+plus `PPTHistoryIframe` taken out of range so the pricing-history chart could
+travel with the block it belongs to. The hand-written code is `App()` and
 `PricingHistoryTab` at the end of that file; both carry header comments saying
-so. See [Divergence from google-dash](#divergence-from-google-dash).
+so.
+
+The exact line-number map this section used to carry has been removed rather
+than left to rot: the file has been edited substantially since the split, so the
+boundaries it named no longer fall where it said. Use `git log -- js/dashboard.jsx`
+and the per-section banner comments. See
+[Divergence from google-dash](#divergence-from-google-dash).
 
 ### Deliberately not built yet
 

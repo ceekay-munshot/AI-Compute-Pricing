@@ -633,9 +633,19 @@ function buildQuarterResponse(ctx) {
     quarterSeries[sku] = agg;
     for (const a of agg) quarterIdSet.add(a.quarter);
 
-    if (agg.length >= 2) {
-      const current = agg[agg.length - 1];
-      const prior = agg[agg.length - 2];
+    // The comparator is the PRIOR CALENDAR quarter, resolved by id. A quarter
+    // with no capture is absent from agg (aggregateQuartersForSKU groups only
+    // observed points), so stepping back one POSITION would compare across a
+    // gap and report a two-quarter move under a heading that says "QoQ =
+    // quarter-close vs prior-quarter close". The financial view on this same
+    // tab already resolves its comparator by id; this one now does too. Latent
+    // while quarters are contiguous, but this file already records a 20-day
+    // capture outage (2026-08-22 to 2026-09-10).
+    const current = agg.length ? agg[agg.length - 1] : null;
+    const prior = current
+      ? (agg.find(a => a.quarter === priorQuarterId(current.quarter)) || null)
+      : null;
+    if (current && prior) {
       // Close on the quarter's own measure, not on the floor field, which is
       // empty for every quarter after the source dropped its range.
       const currentClose = current.quarterClosePricePerHour;
@@ -683,6 +693,10 @@ function buildQuarterResponse(ctx) {
         quartersAvailable: agg.length,
         latestQuarter: agg[agg.length - 1]?.quarter || null,
         currentIsQTD: agg[agg.length - 1]?.isQTD || false,
+        // Set when the latest quarter has data but the calendar quarter before
+        // it has none — which a bare quarter count cannot distinguish from
+        // simply not having enough history yet.
+        priorQuarterMissing: !!(current && !prior),
       };
       signals[sku] = 'insufficient-data';
     }
@@ -765,8 +779,14 @@ function emptyResponse(reason, isQuarter) {
    Quarter labels are quarter-end month format (Q1→Mar, Q2→Jun, Q3→Sep,
    Q4→Dec) — matches equity analyst period conventions. */
 
-const FINANCIAL_PRIMARY_SKUS = ['Nvidia B200', 'Nvidia H200', 'Nvidia H100'];
-const FINANCIAL_SECONDARY_SKUS = ['Nvidia GB200', 'Nvidia A100', 'Nvidia L40S'];
+// These are published in the financial responses and describe the split the
+// page actually draws: five primary rows with only the L40S behind a
+// "+ Show L40S" toggle (js/dashboard.jsx, GPU_FIN_PRIMARY_ROWS /
+// GPU_FIN_SECONDARY_ROWS). They previously named a three-and-three split that
+// no longer matched the table, so the API and the screen answered "which GPUs
+// are primary?" differently.
+const FINANCIAL_PRIMARY_SKUS = ['Nvidia A100', 'Nvidia H100', 'Nvidia H200', 'Nvidia B200', 'Nvidia GB200'];
+const FINANCIAL_SECONDARY_SKUS = ['Nvidia L40S'];
 
 function monthIdForDate(dateStr) {
   return dateStr.slice(0, 7); // "2026-04-21" → "2026-04"
