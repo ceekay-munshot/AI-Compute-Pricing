@@ -862,7 +862,6 @@ function ModelPricingHistoryBlock(){
          forty cells were filled — the two disagreed on screen, and the chart
          was the one that was wrong. The matrix below carries the same series
          with its coverage and basis per cell. */}
-      {state.phase==="ready"&&<MeasureBreakCaption mb={state.data?.measureBreaks}/>}
 
       {/* ── Matrix section header (kept minimal — methodology lives at bottom) ── */}
       {state.phase==="ready"&&state.data?.quarters?.length>0&&(
@@ -949,15 +948,6 @@ function ModelPricingHistoryBlock(){
                           :"";
                       }
                     }
-                    // Under QoQ/YoY the sub-line falls back to the LEVEL whenever
-                    // there is no matched-model count to show (growthSub above), which
-                    // is exactly the case for a cell whose growth was refused as a
-                    // change of measure. That level is a price like any other, so it
-                    // takes the post-change dagger. The mark used to render only in
-                    // the Avg view while MeasureBreakCaption promised it in all three,
-                    // so under QoQ/YoY the caption pointed at a marker nothing drew —
-                    // on the very cells the caption is about.
-                    const subIsLevel=view!=="avg"&&matched==null;
                     // Grey marks an EMPTY cell, not an estimated one. An estimate is
                     // rendered in the measured colour at the owner's explicit
                     // direction, so it cannot be read as weaker data on a slide.
@@ -988,8 +978,8 @@ function ModelPricingHistoryBlock(){
                     return(
                       <td key={c.slug} style={{padding:"10px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",textAlign:"right",fontWeight:600,color,whiteSpace:"nowrap"}}
                           title={refusedWhy||[growthWhy,tip,afterChangeTitle(afterChange?c.basis:null,c.basisExcludedObs)].filter(Boolean).join(" · ")}>
-                        <div>{main}{view==="avg"&&afterChange&&main!=="—"&&afterChangeMark()}</div>
-                        <div style={{fontSize:9,color:withheld&&!showEst?"#d1d5db":"#9ca3af",fontWeight:400,marginTop:1}}>{sub}{subIsLevel&&afterChange&&sub&&sub!=="—"&&afterChangeMark()}</div>
+                        <div>{main}</div>
+                        <div style={{fontSize:9,color:withheld&&!showEst?"#d1d5db":"#9ca3af",fontWeight:400,marginTop:1}}>{sub}</div>
                       </td>
                     );
                   })}
@@ -1291,7 +1281,7 @@ function ModelPricingMatrixTable(){
         const basis=rep.priceBasis?.[metricKey]?.[p.id];
         return(
           <td key={p.id} style={{...tdMain,...bStyle(i)}} title={afterChangeTitle(basis,rep.basisExcludedObs?.[metricKey]?.[p.id])}>
-            {fmtPrice(val)}{basis&&val!=null&&afterChangeMark()}
+            {fmtPrice(val)}
           </td>
         );
       })}
@@ -1319,7 +1309,6 @@ function ModelPricingMatrixTable(){
   return(
     <div style={{marginBottom:16}}>
       {header}
-      <MeasureBreakCaption mb={data.measureBreaks}/>
       <div style={{border:"0.5px solid #e5e7eb",borderRadius:8,overflow:"hidden",background:"#f9fafb"}}>
         <div style={{overflowX:"auto"}}>
           <table style={{width:"100%",borderCollapse:"separate",borderSpacing:0,background:"#f3f4f6",minWidth:FIRST_COL_W+COL_W*periods.length}}>
@@ -1439,7 +1428,7 @@ function ModelPricingMatrixTable(){
                               const basis=row.priceBasis?.[section.key]?.[p.id];
                               return(
                                 <td key={p.id} style={{...tdMain,...bStyle(i)}} title={afterChangeTitle(basis)}>
-                                  {fmtPrice(val)}{basis&&val!=null&&afterChangeMark()}
+                                  {fmtPrice(val)}
                                 </td>
                               );
                             }
@@ -2342,9 +2331,6 @@ function measureChangedTag(){
 
 // Marks a model price the source reported after it changed what it reports.
 // Same size and weight as the thin-coverage marker, in the boundary's amber.
-function afterChangeMark(){
-  return <sup style={{color:"#b45309",fontSize:8,fontWeight:700,marginLeft:1}}>&dagger;</sup>;
-}
 
 // Tooltip for a model price cell. basis is the date of the change it was
 // reported after (absent on the original measure); left counts observations
@@ -2356,21 +2342,6 @@ function afterChangeTitle(basis,left){
   return parts.length?parts.join(" "):undefined;
 }
 
-// The caption above a model-pricing table when the source changed what it
-// reports inside the history. Same neutral amber note as the GPU matrix's
-// basis caption — the data is right, the source changed WHICH price it
-// reports (see _model-price-basis.js; it is not a unit change) — carrying the
-// server's plain-words account of what changed and when.
-function MeasureBreakCaption({mb}){
-  const s=mb?.summary;
-  if(!s)return null;
-  return(
-    <div style={{background:"#fffbeb",border:"0.5px solid #fde68a",borderRadius:6,padding:"8px 11px",marginBottom:8,fontSize:11,color:"#92400e",lineHeight:1.55}}>
-      <b style={{fontWeight:700}}>{s.headline}</b>{" "}{s.detail}{" "}
-      A <sup style={{fontWeight:700}}>&dagger;</sup> marks a price reported after the change.
-    </div>
-  );
-}
 
 // First period column whose rows stand on a different measure from the
 // column before — where the dashed rule is drawn. The model-pricing twin of

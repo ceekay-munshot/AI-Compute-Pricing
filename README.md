@@ -148,8 +148,22 @@ repo has deliberately moved first, and they are all presentation:
   both `Show diagnostics` disclosures are gone, taking the feed-integrity panel
   and the illustrative-data toggle with them. Endpoint paths, raw exception text
   and the `HISTORY_KV` binding name no longer appear on screen. Methodology
-  footnotes, the basis-change banner and every coverage marker were kept — they
-  explain the data rather than the machinery.
+  footnotes and every coverage marker were kept — they explain the data rather
+  than the machinery.
+- **The model-pricing basis-change banner was removed too**, at the owner's
+  request. The amber caption above the Quarterly Pricing Matrix and the peer
+  matrix — the one that announced the 2026-07-10 change — is gone, and so is the
+  `†` post-change price marker, because that caption was its only legend and a
+  lone dagger with no key is worse than none.
+
+  **The refusal itself is untouched.** Growth spanning the change is still never
+  computed; `_model-price-basis.js` is unchanged. Only the announcement went.
+  What a reader still gets: the plain-words `measure changed` tag in a refused
+  cell, the per-cell hover carrying the server's reason for it, the dashed rule
+  in the peer matrix, and one clause in that matrix's Methodology footnote. The
+  Quarterly Pricing Matrix has no on-screen explanation of the tag any more —
+  only the hover. The GPU tab keeps its own separate basis caption; it was not
+  part of this request.
 - **The two pricepertoken proxies inject extra CSS** to hide the upstream's own
   promo bar, newsletter signup and paid sponsor slots. Anchored on structure and
   `rel="sponsored"`, never on sponsor names, and scoped so the pricing table,
