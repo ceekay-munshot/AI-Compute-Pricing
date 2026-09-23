@@ -879,7 +879,11 @@ function ModelPricingHistoryBlock(){
   const subtitle=weighted
     ?"Model API price per token by calendar quarter, weighted by the tokens each model actually served on OpenRouter — what was paid, not what was listed."
     :"Average model API price per token by calendar quarter, grouped by provider family, for historical comparison.";
-  const unitHint=metric==="input"?"Input $/1M tokens":"Output $/1M tokens";
+  // Follows BOTH controls: under QoQ/YoY every cell is a percentage, so naming a
+  // dollar unit there told the reader the wrong unit for the numbers on screen.
+  const unitHint=view==="avg"
+    ?(metric==="input"?"Input $/1M tokens":"Output $/1M tokens")
+    :(metric==="input"?"Input, % change":"Output, % change");
   const cellColor=(v)=>v===null||v===undefined?"#9ca3af":v>0?"#dc2626":v<0?"#059669":"#6b7280";
 
   return(

@@ -14,8 +14,9 @@
 #   - /api/gpu-hardware-pricing-history-refresh  — not deployed at all
 #   - /api/openrouter-model-usage                — read-through capture disabled
 #   - /api/openrouter-chart-weekly               — POST ?capture=1 removed
-# There are no capture scripts, cron triggers, scheduled workers, seed files
-# or backfills in this repo, and no .github/workflows directory. If a series
+# There are no capture scripts, cron triggers, scheduled workers or backfills in
+# this repo, and no .github/workflows directory. One read-only seed file exists
+# (functions/api/_openrouter-chart-seed.js); it is never written back. If a series
 # looks stale, the fix belongs in google-dash, not here.
 #
 # Same namespace for production and preview (preview_id === id) so preview

@@ -20,23 +20,7 @@ says otherwise.
 price-per-1M-tokens reference view, the peer matrix and the market-share
 signal, plus the *Quality / Value Scatter* subtab.
 
-**GPU Hardware Pricing** — `# AI Compute Pricing
-
-A standalone Cloudflare Pages dashboard for tracking the price of AI compute:
-what a million tokens costs across frontier models, and what a GPU-hour costs
-across the hardware those models run on.
-
-It began as a **direct copy** of the pricing sections of
-[`ceekay-munshot/google-dash`](https://github.com/ceekay-munshot/google-dash)
-(at commit `863c950`), lifted out so price tracking has its own home instead of
-sitting behind five other tabs. It reads the same data store, so the two
-dashboards show identical numbers. The UI, sorting, tooltips and copy are
-unchanged except where [Divergence from google-dash](#divergence-from-google-dash)
-says otherwise.
-
----
-
-/GPU-hour month-on-month by GPU model, with both
+**GPU Hardware Pricing** — `$/GPU-hour` month-on-month by GPU model, with both
 subtabs: *Financial Correlation* and *Infra Monitoring*.
 
 The GPU table's **$/kW-hr** column is the hourly price divided by the card's rated
@@ -49,24 +33,8 @@ price beside it is a median blended across every provider listing that model. Th
 column states its own caveat under the table. Both sides denominate one GPU, and
 the parser refuses to emit a figure if the source ever stops saying so.
 
-**Pricing History** — *Quarterly Model Pricing by Company*, the average `# AI Compute Pricing
-
-A standalone Cloudflare Pages dashboard for tracking the price of AI compute:
-what a million tokens costs across frontier models, and what a GPU-hour costs
-across the hardware those models run on.
-
-It began as a **direct copy** of the pricing sections of
-[`ceekay-munshot/google-dash`](https://github.com/ceekay-munshot/google-dash)
-(at commit `863c950`), lifted out so price tracking has its own home instead of
-sitting behind five other tabs. It reads the same data store, so the two
-dashboards show identical numbers. The UI, sorting, tooltips and copy are
-unchanged except where [Divergence from google-dash](#divergence-from-google-dash)
-says otherwise.
-
----
-
-/1M
-tokens block with its *Model-day weight* vs *Usage weighted* toggle, its *Avg /
+**Pricing History** — *Quarterly Model Pricing by Company*, the average `$/1M
+tokens` block with its *Model-day weight* vs *Usage weighted* toggle, its *Avg /
 QoQ / YoY* views and input/output split out; below it the reverse-proxied
 pricepertoken.com/pricing-history chart. The quarterly block used to sit on
 Model Pricing between the share signal and the live embed; the chart is new
@@ -112,7 +80,7 @@ would keep being served for the full 5 minutes after the source recovered. It is
 sent `private, max-age=60`, which the edge cache refuses and a browser honours.
 The stored fallback copy is keyed with `CACHE_SCHEMA`, so a schema bump abandons
 it along with the response entries. Pinned by
-`functions/api/__tests__/gpu-stale-fallback.test.mjs`.
+`functions/api/__tests__/gpu-listing-fallback.test.mjs`.
 
 If you change a TTL, change it with this table. The trap is that a longer cache
 looks free — the page gets faster and nothing appears to break, because stale
@@ -210,9 +178,16 @@ repo has deliberately moved first, and they are all presentation:
   edge caching now does the load-shedding those long TTLs were paying for. See
   [Freshness](#freshness--how-current-the-numbers-are).
 
-**No figure has diverged.** The three write-path removals listed above are still
-the only differences that touch data; the proxy changes are presentational CSS
-only, and `functions/ppt-api/[[path]].js` is copied from google-dash unchanged.
+**Figures have since diverged, deliberately.** This was true when the split was
+made; it is not true now. The correctness work of 2026-09-21 changed how several
+numbers are computed here — the change-of-measure refusal in
+`_model-price-basis.js`, like-for-like provider growth, and the day-selection and
+attribution rules in `pricing-share-signal.js`. Each fixes how this repo selects
+and aggregates the values the source published; none rewrites one. google-dash
+has not received them, so the two dashboards WILL disagree on model price changes
+and on the "Biggest price cut" headline until it does. The proxy changes remain
+presentational CSS only, and `functions/ppt-api/[[path]].js` is still copied from
+google-dash unchanged.
 
 ---
 
@@ -237,10 +212,19 @@ copied endpoints was removed here:
 | `/api/openrouter-model-usage` | a `GET` banks the current ISO week | read-through capture **disabled** |
 | `/api/openrouter-chart-weekly` | `POST ?capture=1` writes the series | `POST` handler **removed** |
 
-Those three files are the only place this repo diverges from google-dash on the
-backend, and each carries a comment saying so. There are no capture scripts,
-cron triggers, scheduled workers, seed files, fixtures, migrations or backfills
-here, and **no `.github` directory at all**.
+Those three removals are what keeps this repo read-only, and each carries a
+comment saying so. They are no longer the only backend divergence: of the 27
+Functions files shared with google-dash, 10 have been modified here and 3 are new
+(`_edge-cache.js`, `_gpu-tracked-skus.js`, `_model-price-basis.js`). See
+[Divergence from google-dash](#divergence-from-google-dash).
+
+There are no capture scripts, cron triggers, scheduled workers, fixtures,
+migrations or backfills here, and **no `.github` directory at all**. There is one
+seed file — `functions/api/_openrouter-chart-seed.js`, a bootstrap snapshot for
+the OpenRouter weekly series. It is read-only and never written back; captured
+weeks in KV override and extend it. It is stale (captured 2026-05-20) and the
+endpoint falls back to it silently, so a series dated May 2026 means the KV
+series is empty, not that the market stopped moving.
 
 If a series looks stale, the fix belongs in google-dash. Not here.
 
@@ -377,7 +361,7 @@ be re-spliced into `index.html` and committed alongside the `.jsx` change:
 npm install
 npm run build        # re-splice the bundle into index.html
 npm run build:check  # must print "index.html is up to date"
-npm test             # 32/32
+npm test             # 146/146
 ```
 
 `npm run build:check` is deterministic, so it is a reliable staleness guard.
@@ -407,7 +391,6 @@ Structural room is left for these; none of them exist:
 
 - side-by-side comparison view
 - forward curves (3M / 6M / 12M)
-- cost-per-watt per GPU
 
 ---
 

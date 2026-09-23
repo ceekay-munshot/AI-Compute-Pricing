@@ -506,8 +506,11 @@ function buildMatrix(levelsBySlug, weighting, events) {
       cell.topWeightShare = w.topShare === null ? null : round3(w.topShare);
       cell.topWeightShareLabel = w.topShare === null ? null : (w.topShare * 100).toFixed(0) + '%';
       // A withheld cell still gets an ESTIMATE so the table can be read across
-      // without holes. It is never presented as measured: the UI renders it
-      // greyed and suffixed "est", and `estimateBasis` says where it came from.
+      // without holes. NOTE: the dashboard renders it in the SAME format as a
+      // measured cell — same colour, same "N models · X% covered" sub-label, no
+      // "est" marker — at the owner's explicit direction (see the comment at
+      // js/dashboard.jsx, showEst). Only the hover tooltip distinguishes it.
+      // `estimateBasis` says where the ratio came from.
       //   provisional — the weighting computed this from real tokens; the gate
       //                 withheld it because the basis was too thin to publish
       //                 as measured. Real arithmetic, narrow evidence.
