@@ -446,10 +446,6 @@ function PricingShareSignalBlock(){
         <div style={{fontSize:16,fontWeight:700,color:"#111827",lineHeight:1.3}}>Pricing Behavior and Market Share Read-Through</div>
         <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>Where pricing moves are translating into share gains, resilience, or anomalies.</div>
       </div>
-      {/* In the header so the partial view carries it too. Never beside the
-          error card: behind needs figures that loaded, and once they have,
-          this block never goes back to an error. */}
-      {health.behind&&<NotUpdatedNote since={health.okAt}/>}
     </>
   );
 
@@ -736,12 +732,13 @@ const BUILD=typeof __BUILD__!=="undefined"?__BUILD__:"dev";
    browser to revalidate (cache:"no-cache"), otherwise a long max-age would
    hand back the very copy it is trying to replace.
 
-   Keeping the figures is not the same as keeping quiet about them. Each block
-   records when its figures last actually arrived (useUpdateHealth); once a
-   refresh fails with them older than NOT_UPDATED_AFTER_MS, the block says so
-   above them, in amber, with the time — a line, never an error card. The
-   header reports the last time any block received figures, not the time a
-   refresh was started.
+   Each block records when its figures last actually arrived (useUpdateHealth),
+   and the header reports the last time any block received figures, not the
+   time a refresh was started — that timestamp is how the page says how current
+   it is. There are no amber "not updated" banners: this is a customer-facing
+   page, and a missed refresh is routine and heals on the next tick. The one
+   place age changes wording is the GPU listing, which drops "live" and states
+   its capture time in its subtitle once it is behind.
 
    How far behind the SOURCE any figure can be is set server-side, not here —
    see CACHE_TTL in functions/api/provider-pricing-matrix.js and
@@ -753,16 +750,16 @@ const REFRESH_EVERY_MS=10*60*1000;
 // outside App.
 const DataRefreshContext=createContext({dataTick:0,embedTick:0,reportUpdate:()=>{}});
 
-/* How old a block's figures may get, with a refresh failing, before the block
-   says so. One missed refresh is routine — a slow upstream, a network blip —
-   and flagging it would cry wolf; by the second the page is two whole refresh
-   periods behind what it implies. Derived from the cadence, so changing one
-   cannot quietly break the other. 15 minutes today. */
+/* How old a block's figures may get, with a refresh failing, before they
+   count as behind (the GPU listing then stops calling itself live). One missed
+   refresh is routine — a slow upstream, a network blip; by the second the page
+   is two whole refresh periods behind what it implies. Derived from the
+   cadence, so changing one cannot quietly break the other. 15 minutes today. */
 const NOT_UPDATED_AFTER_MS=1.5*REFRESH_EVERY_MS;
 
 /* One way to write a moment on this page — "Sep 21, 2026 · 06:33 UTC" — for
-   the header, the not-updated notes and the GPU capture time alike, so no two
-   places can disagree about the zone or the format. */
+   the header and the GPU capture time alike, so no two places can disagree
+   about the zone or the format. */
 function utcLabel(t){
   const d=new Date(t);
   const datePart=d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric",timeZone:"UTC"});
@@ -770,23 +767,10 @@ function utcLabel(t){
   return datePart+" · "+timePart+" UTC";
 }
 
-/* "under a minute" · "12 min" · "3 h 5 min" · "2 days". Negative spans — a
-   reader's clock running behind the server's — clamp to zero rather than
-   reading as a time in the future. */
-function ageLabel(ms){
-  const m=Math.floor(Math.max(0,ms)/60000);
-  if(m<1)return"under a minute";
-  if(m<60)return m+" min";
-  const h=Math.floor(m/60);
-  if(h<48)return h+" h"+(m%60?" "+(m%60)+" min":"");
-  return Math.floor(h/24)+" days";
-}
-
 /* Per block: when its figures last arrived, and whether a refresh has failed
    since. `behind` needs a FAILED refresh, not merely elapsed time, so a page
-   coming back from a long hide does not flash a warning while its catch-up
-   refresh is still in flight. fail() stamps a fresh time on every call, which
-   re-renders the note with its current age. */
+   coming back from a long hide does not drop "live" while its catch-up
+   refresh is still in flight. */
 function useUpdateHealth(){
   const {reportUpdate}=useContext(DataRefreshContext);
   const[h,setH]=useState({okAt:null,failedAt:null});
@@ -798,26 +782,6 @@ function useUpdateHealth(){
   const fail=useCallback(()=>setH(s=>({...s,failedAt:Date.now()})),[]);
   const behind=h.okAt!=null&&h.failedAt!=null&&h.failedAt-h.okAt>=NOT_UPDATED_AFTER_MS;
   return{okAt:h.okAt,behind,ok,fail};
-}
-
-/* The one notice for figures older than the page implies. Amber like the
-   partial-data notes, not red like an error: these are real figures, just not
-   current ones, and the reader should weigh them rather than distrust them. */
-function NotCurrentNote({lead,children}){
-  return(
-    <div role="status" style={{display:"flex",gap:8,alignItems:"flex-start",fontSize:11,color:"#78350f",background:"#fffbeb",border:"0.5px solid #fcd34d",borderRadius:6,padding:"7px 11px",marginBottom:10,lineHeight:1.5}}>
-      <span aria-hidden="true" style={{width:7,height:7,borderRadius:"50%",background:"#d97706",flexShrink:0,marginTop:5}}/>
-      <span><b style={{fontWeight:600}}>{lead}</b> {children}</span>
-    </div>
-  );
-}
-
-function NotUpdatedNote({since}){
-  return(
-    <NotCurrentNote lead={"Not updated since "+utcLabel(since)+" ("+ageLabel(Date.now()-since)+" ago)."}>
-      The latest automatic update didn't come through, so what you see is what loaded then. The page keeps trying and replaces it as soon as an update lands.
-    </NotCurrentNote>
-  );
 }
 
 /* The cache-busting bucket in an embed's URL, fixed for the life of the embed.
@@ -992,16 +956,7 @@ function ModelPricingHistoryBlock(){
         {state.phase==="loading"&&<span><Spin size={10}/></span>}
       </div>
 
-      {/* Only over figures that are on screen: switching metric or weight can
-          still raise the error card, and this note must never sit on one. */}
-      {state.phase==="ready"&&health.behind&&<NotUpdatedNote since={health.okAt}/>}
 
-      {/* Per-provider upstream failure note — partial data still renders */}
-      {state.data?.providerErrors?.length>0&&(
-        <div style={{fontSize:11,color:"#92400e",background:"#fef3c7",border:"0.5px solid #fde68a",borderRadius:6,padding:"6px 10px",marginBottom:8,lineHeight:1.4}}>
-          Partial data · upstream temporarily unavailable for {state.data.providerErrors.map(e=>e.slug).join(", ")} — other providers render as normal.
-        </div>
-      )}
 
       {/* The Quarterly Pricing Trend chart was removed here. It plotted only
          measured values, so once withheld cells began carrying estimates it
@@ -1335,9 +1290,6 @@ function ModelPricingMatrixTable(){
         </div>
         <SegToggle value={gran} onChange={setGran} options={[{v:"quarter",label:"Quarterly"},{v:"month",label:"Monthly"}]}/>
       </div>
-      {/* Never beside the error card: behind needs figures that loaded, and
-          once they have, this block never goes back to an error. */}
-      {health.behind&&<NotUpdatedNote since={health.okAt}/>}
     </>
   );
 
@@ -1822,41 +1774,6 @@ function fmtUSD(v){
   return"$"+v.toFixed(2);
 }
 
-/* ─── GPU price capture note ─────────────────────────────────
-   Everything historical on this tab — period averages, quarter closes, the
-   daily table — is built from one GPU price capture a day. When that stops,
-   the history simply ends and nothing on screen says its last point is old;
-   when it misses a run of days, the periods around the hole rest on fewer
-   days than their labels suggest. Neither the 2026-08-22 → 2026-09-10 hole
-   nor the stop after 2026-09-16 was visible anywhere. The wider daily
-   capture kept running through both — only the GPU prices were missing — so
-   the wording names GPU prices, not the capture. When it counts as stopped
-   (over 3 days) and which holes matter (5+ days) are the server's decisions,
-   read from its data-quality block, not re-derived here. */
-function isoAddDays(iso,n){
-  const t=Date.parse(iso+"T00:00:00Z");
-  return isFinite(t)?new Date(t+n*86400000).toISOString().slice(0,10):iso;
-}
-function GPUCaptureNote({dq}){
-  if(!dq)return null;
-  const ago=n=>n!=null?" ("+n+" day"+(n===1?"":"s")+" ago)":"";
-  const lines=[];
-  if(dq.gpuFeedStale&&dq.latestGPUObservationDate){
-    lines.push(<><b style={{fontWeight:600}}>No GPU prices captured since {dq.latestGPUObservationDate}</b>{ago(dq.daysSinceLatestGPUObservation)}. The price history on this tab ends there — it is not a current reading.</>);
-  }else if(dq.priceFieldStale&&dq.latestPricedObservationDate){
-    lines.push(<><b style={{fontWeight:600}}>No new GPU price captured since {dq.latestPricedObservationDate}</b>{ago(dq.daysSinceLatestPricedObservation)}. The price history on this tab ends there — it is not a current reading.</>);
-  }
-  for(const g of (dq.significantCaptureGaps||[])){
-    lines.push(<><b style={{fontWeight:600}}>No GPU prices captured for {g.missingDays} days, {isoAddDays(g.afterDate,1)} to {isoAddDays(g.beforeDate,-1)}.</b> The months and quarters around it rest on fewer days than their length.</>);
-  }
-  if(!lines.length)return null;
-  return(
-    <div role="note" style={{background:"#fffbeb",border:"0.5px solid #fde68a",borderRadius:6,padding:"7px 11px",marginTop:8,fontSize:11,color:"#92400e",lineHeight:1.5}}>
-      {lines.map((l,i)=><div key={i}>{l}</div>)}
-    </div>
-  );
-}
-
 function GPUHardwarePricingTab(){
   const[err,setErr]=useState(false);
   const[data,setData]=useState(null);
@@ -1916,9 +1833,12 @@ function GPUHardwarePricingTab(){
   // this page has not managed to refresh it for a while. Either way the time
   // shown is the listing's own capture time, not when this page received it.
   const listingOld=!!data&&(data.stale===true||hData.behind);
+  // Where the daily GPU price history ends, when it has stopped short of today:
+  // stated as a plain date range in the header, so the history is never taken
+  // for a current reading. The server decides when it counts as stopped.
+  const gdq=fHist?.dataQuality;
+  const gpuThrough=gdq?.gpuFeedStale?gdq.latestGPUObservationDate:gdq?.priceFieldStale?gdq.latestPricedObservationDate:null;
   const listingAt=data?Date.parse(data.fetchedAt):NaN;
-  // The history view on screen is whichever of the two the toggle shows.
-  const hShownHist=histView==="quarter"?hQHist:hHist;
 
   return(
     <>
@@ -1928,12 +1848,9 @@ function GPUHardwarePricingTab(){
       <div style={{marginBottom:10}}>
         <div style={{fontSize:16,fontWeight:700,color:"#111827",lineHeight:1.3}}>GPU Hardware Pricing</div>
         <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>
-          Two lenses on the same strategic GPU basket · daily snapshots underneath captured since <b style={{color:"#6b7280",fontWeight:600}}>{fHist?.trackingSinceRealDate||"—"}</b>
+          Two lenses on the same strategic GPU basket · daily snapshots {gpuThrough?"from":"captured since"} <b style={{color:"#6b7280",fontWeight:600}}>{fHist?.trackingSinceRealDate||"—"}</b>
+          {gpuThrough&&<>{" to "}<b style={{color:"#6b7280",fontWeight:600}}>{gpuThrough}</b></>}
         </div>
-        {/* Above the subtab switcher so it covers both lenses: a stopped
-            capture freezes the financial matrix and the operational history
-            alike. */}
-        <GPUCaptureNote dq={fHist?.dataQuality}/>
       </div>
 
       {/* Subtab switcher */}
@@ -1954,15 +1871,13 @@ function GPUHardwarePricingTab(){
       </div>
 
       {gpuSubtab==="financial"
-        ? <GPUFinancialSubtab fHist={fHist} fHistErr={fHistErr}
-            notUpdatedSince={hFHist.behind?hFHist.okAt:null}/>
+        ? <GPUFinancialSubtab fHist={fHist} fHistErr={fHistErr}/>
         : <GPUInfraMonitoringSubtab
             data={data} loadErr={loadErr}
             listingOld={listingOld} listingAt={listingAt}
             histView={histView} setHistView={setHistView}
             qHist={qHist} qHistErr={qHistErr}
             hist={hist} histErr={histErr}
-            histNotUpdatedSince={hShownHist.behind?hShownHist.okAt:null}
             embedErr={err} setEmbedErr={setErr}
           />
       }
@@ -1977,7 +1892,7 @@ function GPUHardwarePricingTab(){
    - Primary rows (B200/H200/H100) always visible
    - Secondary rows (A100/GB200/L40S) behind "Show more" expansion
 ═══════════════════════════════════════════════════════ */
-function GPUFinancialSubtab({fHist,fHistErr,notUpdatedSince}){
+function GPUFinancialSubtab({fHist,fHistErr}){
   return(
     <>
       {/* Section label */}
@@ -1994,8 +1909,6 @@ function GPUFinancialSubtab({fHist,fHistErr,notUpdatedSince}){
         </div>
       </div>
 
-      {notUpdatedSince!=null&&<NotUpdatedNote since={notUpdatedSince}/>}
-
       {/* Financial matrix */}
       <GPUFinancialCorrelationBlock fHist={fHist} fHistErr={fHistErr}/>
     </>
@@ -2009,7 +1922,7 @@ function GPUFinancialSubtab({fHist,fHistErr,notUpdatedSince}){
    - Operational GPU Pricing History (quarter-close / QTD / daily)
    - Live reverse-proxied getdeploying table
 ═══════════════════════════════════════════════════════ */
-function GPUInfraMonitoringSubtab({data,loadErr,listingOld,listingAt,histView,setHistView,qHist,qHistErr,hist,histErr,histNotUpdatedSince,embedErr,setEmbedErr}){
+function GPUInfraMonitoringSubtab({data,loadErr,listingOld,listingAt,histView,setHistView,qHist,qHistErr,hist,histErr,embedErr,setEmbedErr}){
   const bucket=useEmbedBucket();
   const rows=data?.rows||[];
   const byName={};
@@ -2099,34 +2012,24 @@ function GPUInfraMonitoringSubtab({data,loadErr,listingOld,listingAt,histView,se
           current (listingOld, decided once in GPUHardwarePricingTab), so the
           heading can never vouch for prices the note below calls old. */}
       <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
-        <span style={{width:7,height:7,borderRadius:"50%",background:listingOld?"#d97706":"#0e7490",display:"inline-block",animation:listingOld?"none":"gpupulse 2s infinite"}}/>
-        <span style={{fontSize:10,textTransform:"uppercase",letterSpacing:".09em",fontWeight:700,color:listingOld?"#b45309":"#0e7490"}}>
-          {listingOld?"Infra signal — prices from an earlier capture":"Live infra signal — current market plumbing"}
+        <span style={{width:7,height:7,borderRadius:"50%",background:"#0e7490",display:"inline-block",animation:listingOld?"none":"gpupulse 2s infinite"}}/>
+        <span style={{fontSize:10,textTransform:"uppercase",letterSpacing:".09em",fontWeight:700,color:"#0e7490"}}>
+          {listingOld?"Infra signal — latest captured prices":"Live infra signal — current market plumbing"}
         </span>
       </div>
 
       {/* Title + subtitle */}
       <div style={{marginBottom:12}}>
         <div style={{fontSize:14,fontWeight:700,color:"#111827",lineHeight:1.3}}>
-          {listingOld?"Provider pricing (earlier capture), quarter-close history, and vendor table":"Live provider pricing, quarter-close history, and vendor table"}
+          {listingOld?"Provider pricing, quarter-close history, and vendor table":"Live provider pricing, quarter-close history, and vendor table"}
         </div>
         <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>
-          {listingOld?"$/hr per SKU across the providers listing it, as last captured":"Current $/hr per SKU across the providers listing it"} · operational history uses quarter-close (last real snapshot in quarter).
+          {listingOld
+            ?"$/hr per SKU across the providers listing it"+(Number.isFinite(listingAt)?", as of "+utcLabel(listingAt):"")
+            :"Current $/hr per SKU across the providers listing it"} · operational history uses quarter-close (last real snapshot in quarter).
         </div>
       </div>
 
-      {/* Directly above the numbers it qualifies, so it cannot be scrolled past
-          on the way to them. The time is the listing's own capture time. */}
-      {listingOld&&(
-        <NotCurrentNote lead={Number.isFinite(listingAt)
-            ?"Prices captured "+utcLabel(listingAt)+" ("+ageLabel(Date.now()-listingAt)+" ago) — not current."
-            :"Prices from an earlier capture — not current."}>
-          {data.stale
-            ?"Current prices couldn't be loaded from the pricing source just now, so these are the most recent ones captured."
-            :"The latest automatic update didn't come through, so these are the most recent prices on this page."}
-          {" "}The page checks again automatically and switches to current prices as soon as they're available.
-        </NotCurrentNote>
-      )}
 
       {/* KPI cards */}
       {loadErr?(
@@ -2237,7 +2140,6 @@ function GPUInfraMonitoringSubtab({data,loadErr,listingOld,listingAt,histView,se
         histView={histView} setHistView={setHistView}
         qHist={qHist} qHistErr={qHistErr}
         hist={hist} histErr={histErr}
-        notUpdatedSince={histNotUpdatedSince}
       />
 
       {/* Live embed */}
@@ -2580,101 +2482,6 @@ function fmtGrowth(v){
   const str=v<0?"("+Math.abs(v).toFixed(1)+"%)":(v>0?"+":"")+v.toFixed(1)+"%";
   const color=v>0?"#dc2626":v<0?"#059669":"#6b7280";
   return <span style={{color}}>{str}</span>;
-}
-
-/* ─── Feed integrity banner ─────────────────────────────────
-   The matrix renders a missing price and a real $0.00 identically: as an
-   em-dash. That is fine when one cell is empty and actively misleading when
-   a whole column is, because the table still *looks* complete — it just gets
-   shorter or sprouts blanks. This banner states the feed's actual condition
-   above the matrix so a stalled capture can never be read as a flat market.
-
-   Two failure modes are reported separately because they have different
-   fixes: the GPU block no longer arriving at all (capture/cron side), versus
-   the block still arriving with minPricePerHour null (upstream shape change,
-   provider counts keep updating while prices go blank). */
-function GPUFeedIntegrityBanner({dq,periodNoun}){
-  if(!dq)return null;
-  const notes=[];
-  if(dq.priceFieldDroppedWhileFeedLive&&dq.latestPricedObservationDate){
-    notes.push({
-      k:"pricefield",
-      sev:"high",
-      head:"Price field missing from the feed since "+dq.latestPricedObservationDate,
-      body:"GPU rows kept arriving after that date — provider counts are still updating — but minPricePerHour came back empty, so every price cell from then on is blank. "
-           +dq.unpricedDays+" of "+dq.observationDays+" captured days carry no price.",
-    });
-  }else if(dq.priceFieldStale&&dq.latestPricedObservationDate){
-    notes.push({
-      k:"pricestale",
-      sev:"high",
-      head:"No new price observed since "+dq.latestPricedObservationDate,
-      body:"Price cells reflect data that is "+dq.daysSinceLatestPricedObservation+" days old.",
-    });
-  }
-  if(dq.gpuFeedStale&&dq.latestGPUObservationDate){
-    notes.push({
-      k:"feedstale",
-      sev:"high",
-      head:"GPU capture stalled — last observation "+dq.latestGPUObservationDate,
-      body:"That is "+dq.daysSinceLatestGPUObservation+" days ago. Nothing after that date has been captured for any SKU, so the most recent "
-           +periodNoun+" columns are empty rather than flat.",
-    });
-  }
-  // A run of days with no capture at all. The month columns just look thin
-  // when this happens, which reads as a quiet market rather than a missing
-  // one — the 2026-08-22 → 2026-09-10 outage is why Sep-26 rests on six days.
-  for(const g of (dq.significantCaptureGaps||[])){
-    notes.push({
-      k:"capgap-"+g.afterDate,
-      sev:"med",
-      head:g.missingDays+" days with no capture: "+g.afterDate+" → "+g.beforeDate,
-      body:"The months either side of the gap rest on fewer days than their length suggests, so their averages are thinner than the column label implies.",
-    });
-  }
-  // The capture writing prices into the wrong field is what blanked August in
-  // the first place. It is repaired on read, but if this count starts growing
-  // again the capture has regressed and the matrix would otherwise look fine.
-  if(dq.remappedPriceDays>0){
-    notes.push({
-      k:"remap",
-      sev:"low",
-      head:dq.remappedPriceDays+" day"+(dq.remappedPriceDays===1?"":"s")+" recovered from the feed's max field",
-      body:"Those captures landed with the price in maxPricePerHour because the source swapped its range for a single figure. They are reclassified as medians on read; the stored snapshots are untouched. A rising count means the capture has regressed.",
-    });
-  }
-  if(dq.monthsMissing?.length||dq.quartersMissing?.length){
-    const miss=[...(dq.monthsMissing||[]),...(dq.quartersMissing||[])];
-    notes.push({
-      k:"gaps",
-      sev:"med",
-      head:"Gap "+(miss.length===1?"period":"periods")+": "+miss.join(", "),
-      body:"Shown as empty columns rather than dropped from the axis, so the hole stays visible.",
-    });
-  }
-  if(dq.monthsUnpriced?.length||dq.quartersUnpriced?.length){
-    const un=[...(dq.monthsUnpriced||[]),...(dq.quartersUnpriced||[])];
-    notes.push({
-      k:"unpriced",
-      sev:"med",
-      head:"Captured but unpriced: "+un.join(", "),
-      body:"These columns have provider counts but no price, so they contribute nothing to growth or resilience.",
-    });
-  }
-  if(!notes.length)return null;
-  const high=notes.some(n=>n.sev==="high");
-  return(
-    <div style={{background:high?"#fef2f2":"#fffbeb",border:"1px solid "+(high?"#fca5a5":"#fcd34d"),borderRadius:8,padding:"10px 12px",marginBottom:8}}>
-      <div style={{fontWeight:700,textTransform:"uppercase",letterSpacing:".04em",fontSize:10,color:high?"#991b1b":"#92400e",marginBottom:5}}>
-        {high?"⚠ Feed integrity — matrix is not current":"Feed integrity notes"}
-      </div>
-      {notes.map(n=>(
-        <div key={n.k} style={{fontSize:11,color:high?"#7f1d1d":"#92400e",lineHeight:1.5,marginTop:3}}>
-          <b style={{fontWeight:600}}>{n.head}.</b> {n.body}
-        </div>
-      ))}
-    </div>
-  );
 }
 
 function GPUFinancialCorrelationBlock({fHist,fHistErr}){
@@ -3273,7 +3080,7 @@ function renderFinResilienceRows(rows,growth,periods,series,partialKey,dim,bound
    default. Quarter view uses /api/gpu-hardware-pricing-history?view=quarter
    (real-only by default — backfill/synthetic seeds are excluded). Daily
    view remains available as a secondary drill-down. */
-function GPUHistoryShell({histView,setHistView,qHist,qHistErr,hist,histErr,notUpdatedSince}){
+function GPUHistoryShell({histView,setHistView,qHist,qHistErr,hist,histErr}){
   return(
     <div style={{marginBottom:14}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"}}>
@@ -3293,7 +3100,6 @@ function GPUHistoryShell({histView,setHistView,qHist,qHistErr,hist,histErr,notUp
           Investor lens · daily snapshots aggregated by calendar quarter (Q1 Jan–Mar, Q2 Apr–Jun, Q3 Jul–Sep, Q4 Oct–Dec UTC)
         </span>
       </div>
-      {notUpdatedSince!=null&&<NotUpdatedNote since={notUpdatedSince}/>}
       {histView==="quarter"
         ? <GPUQuarterlyBlock qHist={qHist} qHistErr={qHistErr}/>
         : <GPUHistoryBlock hist={hist} histErr={histErr} hideHeader/>
@@ -3506,7 +3312,7 @@ function GPUQuarterlyBlock({qHist,qHistErr}){
                             <div style={{fontWeight:600,color:"#059669"}}>{close!=null?"$"+close.toFixed(2):"—"}{q.isQTD&&<span style={{fontSize:9,color:"#9ca3af",fontWeight:500,marginLeft:3}}>QTD</span>}</div>
                             {avg!=null&&<div style={{fontSize:10,color:"#9ca3af",marginTop:1}}>avg ${avg.toFixed(2)}</div>}
                             {basis&&<div style={{fontSize:9,color:basis==="median"?"#1d4ed8":"#9ca3af",marginTop:1}}>{FIN_BASIS_SHORT[basis]}</div>}
-                            {q.lowCoverage&&<div style={{fontSize:9,color:"#b45309",marginTop:1}}>⚠ low coverage</div>}
+                            {q.lowCoverage&&<div style={{fontSize:9,color:"#9ca3af",marginTop:1}} title="Fewer captured days than the full quarter.">partial coverage</div>}
                           </td>
                         );
                       })}
@@ -3623,7 +3429,7 @@ function QoQCard({short,c,sig}){
           </div>
         </>
       )}
-      {c.lowCoverageFlag&&<div style={{fontSize:9,color:"#b45309",marginTop:2}}>⚠ low-coverage quarter — close may be imprecise</div>}
+      {c.lowCoverageFlag&&<div style={{fontSize:9,color:"#9ca3af",marginTop:2}}>Based on fewer captured days than the full quarter.</div>}
     </div>
   );
 }
@@ -3649,7 +3455,6 @@ function QTDNowCard({short,cur,since,firstQoQQuarter}){
       </div>
       <div style={{fontSize:10,color:"#9ca3af",marginTop:2}}>
         {cur.daysCoveredInQuarter}d observed · {coveragePct}% coverage
-        {cur.lowCoverage&&<span style={{color:"#b45309",marginLeft:4}}>⚠</span>}
       </div>
       <div style={{fontSize:9,color:"#9ca3af",marginTop:4,borderTop:"0.5px dashed #e5e7eb",paddingTop:4}}>
         QoQ available after first completed prior quarter{firstQoQQuarter?(<> · first QoQ: <b style={{fontWeight:600,color:"#6b7280"}}>{firstQoQQuarter}</b></>):null}
@@ -3714,7 +3519,6 @@ function CurrentQuarterSnapshotTable({trackedSKUs,currentQuarterBySku,firstQoQQu
                   <td style={{...gpuTd,textAlign:"right",color:"#374151"}}>{cur.daysCoveredInQuarter}</td>
                   <td style={{...gpuTd,color:"#6b7280",fontSize:11}}>
                     {coveragePct}% of {cur.quarterDayCount}d
-                    {cur.lowCoverage&&<span style={{color:"#b45309",marginLeft:4}}>⚠</span>}
                   </td>
                   <td style={{...gpuTd,color:statusColor,fontWeight:600,fontSize:11}}>{status}</td>
                 </tr>
@@ -3792,7 +3596,6 @@ function QoQComparisonTable({trackedSKUs,qoq,series,signals,currentQuarterBySku}
                   <td style={{...gpuTd,textAlign:"right"}}><QoQCell v={c?.spreadDelta}/></td>
                   <td style={{...gpuTd,color:"#6b7280",fontSize:11}}>
                     {coverageText}
-                    {cur?.lowCoverage&&<span style={{color:"#b45309",marginLeft:4}}>⚠</span>}
                   </td>
                   <td style={{...gpuTd}}>{trendLabel}</td>
                 </tr>
