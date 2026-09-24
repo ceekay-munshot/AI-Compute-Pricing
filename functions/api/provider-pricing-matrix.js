@@ -41,10 +41,11 @@
  *     Google and 10 OpenAI models fell to exactly half on one day. Every price
  *     is read, and every quarter's measure decided, by _model-price-basis.js:
  *     a quarter averages one measure only, and QoQ/YoY between quarters on
- *     different measures compare only the models the change touched in
- *     neither (model-day view), or are refused with a reason
- *     (qoqMeasureChanged / qoqReason, yoyMeasureChanged / yoyReason) instead
- *     of being printed as a price move.
+ *     different measures are LINKED: each model the change moved enters at
+ *     its reported price times the inverse of the change's exact factor, so
+ *     both quarters stand on one measure (<key>Linked, <key>Note). Refused
+ *     with a reason (qoqMeasureChanged / qoqReason, yoyMeasureChanged /
+ *     yoyReason) only where too few models can be linked.
  *
  * Query params:
  *   ?metric=input   (default) — pricing_prompt, scaled to per 1M tokens
@@ -269,9 +270,10 @@ async function fetchAllProviders(providers, batchSize = 4) {
  * excludedN, ... }, mean in $/token), plus `modelLevels`: model -> that
  * model's own mean price in the quarter on the quarter's measure, which the
  * like-for-like growth in buildMatrix compares (modelLevelsOn). Its keys are
- * exactly `models`. `touched` holds the models the source's change of measure
- * touched, which a comparison across that change leaves out. Computed once per
- * request and read by both weightings — the model-day average in buildMatrix
+ * exactly `models`. `modelLinked` holds the same levels on the earlier measure
+ * (see linkOf in _model-price-basis.js), which a comparison across the
+ * source's change of reporting uses. Computed once per request and read by
+ * both weightings — the model-day average in buildMatrix
  * and the usage-weighted resolver — so the two always stand on the same
  * measure in the same quarter.
  *
@@ -320,7 +322,8 @@ function providerQuarterLevels(providerResults, metric, book, columnOf = BY_PROV
       if (!a) acc.set(at.column, (a = { tallies: new Map(), byModel: new Map() }));
       const q = quarterOf(day);
       const basis = book.basisOf(pr.slug, row.model, day);
-      addToTally(tallyFor(a.tallies, q), basis, v, at.model || null);
+      const link = book.linkOf(pr.slug, row.model, day);
+      addToTally(tallyFor(a.tallies, q), basis, v, at.model || null, link);
       // The same observation, kept per model and per measure, so each model's
       // own level can be read on whichever measure the quarter resolves to.
       if (at.model) {
@@ -328,9 +331,12 @@ function providerQuarterLevels(providerResults, metric, book, columnOf = BY_PROV
         if (!models) a.byModel.set(q, (models = new Map()));
         let slots = models.get(at.model);
         if (!slots) models.set(at.model, (slots = new Map()));
-        const s = slots.get(basis) || [0, 0];
+        // [sum, n, sum on the earlier measure, observations with no link]
+        const s = slots.get(basis) || [0, 0, 0, 0];
         s[0] += v;
         s[1] += 1;
+        if (link == null) s[3] += 1;
+        else s[2] += v * link;
         slots.set(basis, s);
       }
     }
@@ -340,26 +346,12 @@ function providerQuarterLevels(providerResults, metric, book, columnOf = BY_PROV
     const levels = new Map();
     for (const [q, t] of a.tallies) {
       const stat = resolveTally(t);
-      stat.modelLevels = modelLevelsOn(a.byModel.get(q), stat.basis);
-      stat.touched = touchedModels(a.byModel.get(q));
+      const { levels: modelLevels, linked } = modelLevelsOn(a.byModel.get(q), stat.basis);
+      stat.modelLevels = modelLevels;
+      stat.modelLinked = linked;
       levels.set(q, stat);
     }
     out.set(column, levels);
-  }
-  return out;
-}
-
-/**
- * The models in one provider-quarter that a change of measure touched: every
- * observation of a touched model carries the measure it was on (basisOf()
- * returns null only for a model no change ever touched).
- */
-function touchedModels(models) {
-  const out = new Set();
-  for (const [model, slots] of models || []) {
-    for (const b of slots.keys()) {
-      if (b != null) { out.add(model); break; }
-    }
   }
   return out;
 }
@@ -375,18 +367,28 @@ function touchedModels(models) {
  * cannot re-enter a comparison through the like-for-like growth below.
  */
 function modelLevelsOn(models, basis) {
-  const out = new Map();
+  const levels = new Map();
+  // The same levels on the earlier measure; null for a model that cannot be
+  // linked there (first listed after the source's change of reporting).
+  const linked = new Map();
   for (const [model, slots] of models || []) {
     let sum = 0;
     let n = 0;
-    for (const [b, [s, k]] of slots) {
+    let linkedSum = 0;
+    let unlinked = 0;
+    for (const [b, [s, k, ls, u]] of slots) {
       if (!countsToward(b, basis)) continue;
       sum += s;
       n += k;
+      linkedSum += ls;
+      unlinked += u;
     }
-    if (n) out.set(model, sum / n);
+    if (n) {
+      levels.set(model, sum / n);
+      linked.set(model, unlinked ? null : linkedSum / n);
+    }
   }
-  return out;
+  return { levels, linked };
 }
 
 // A like-for-like price change needs at least this many models priced in both
@@ -425,31 +427,35 @@ const MIN_MATCHED_SHARE = 0.5;
  *     1M input tokens between 2025-Q3 and 2026-Q3, which alone carries a mean
  *     of % changes to +318% against +73% for the matched models' average.
  *
- * Across a change of measure (`untouchedOnly`), only models the change touched
- * in NEITHER quarter are matched: their figures are on the same measure on both
- * sides, so a model the change moved cannot come back in. The share rule still
- * counts the whole lineup, so the untouched models must be at least half of it
- * — Google's 2026-Q3, where 13 of 29 were touched, stays refused.
+ * Across the source's change of reporting (`linked`), each model enters at its
+ * level on the earlier measure — its reported price times the inverse of the
+ * exact factor the change applied to it (see linkOf in _model-price-basis.js)
+ * — so both quarters stand on one measure. A model that cannot be linked (first
+ * listed after the change) has no earlier-measure figure and is left out.
  *
- * Returns { growth, matched, models, onlyNow, onlyThen, touched } — touched
- * counts the models priced in both quarters that were left out for it. growth
- * is null when fewer than MIN_MATCHED_MODELS, or fewer than MIN_MATCHED_SHARE
- * of `models`, were matched.
+ * Returns { growth, matched, models, onlyNow, onlyThen, moved, unlinked } —
+ * moved counts the matched models the change moved, unlinked those left out
+ * for want of a link. growth is null when fewer than MIN_MATCHED_MODELS, or
+ * fewer than MIN_MATCHED_SHARE of `models`, were matched.
  */
-function matchedModelGrowth(cur, prior, { untouchedOnly = false } = {}) {
-  const leftOut = (model) => untouchedOnly && (cur.touched.has(model) || prior.touched.has(model));
+function matchedModelGrowth(cur, prior, { linked = false } = {}) {
   let sumNow = 0;
   let sumThen = 0;
   let matched = 0;
   let onlyNow = 0;
-  // Priced in both quarters but touched by the change: the models this leaves
-  // out. A model listed after the change is on its measure from day one and
-  // is simply "priced only now", like any other new listing.
-  let touched = 0;
-  for (const [model, now] of cur.modelLevels) {
-    const then = prior.modelLevels.get(model);
-    if (then === undefined) { onlyNow += 1; continue; }
-    if (leftOut(model)) { touched += 1; continue; }
+  let moved = 0;
+  let unlinked = 0;
+  for (const [model, level] of cur.modelLevels) {
+    const thenLevel = prior.modelLevels.get(model);
+    if (thenLevel === undefined) { onlyNow += 1; continue; }
+    let now = level;
+    let then = thenLevel;
+    if (linked) {
+      now = cur.modelLinked.get(model);
+      then = prior.modelLinked.get(model);
+      if (now == null || then == null) { unlinked += 1; continue; }
+      if (Math.abs(now - level) > 1e-15 || Math.abs(then - thenLevel) > 1e-15) moved += 1;
+    }
     sumNow += now;
     sumThen += then;
     matched += 1;
@@ -459,13 +465,13 @@ function matchedModelGrowth(cur, prior, { untouchedOnly = false } = {}) {
     if (!cur.modelLevels.has(model)) onlyThen += 1;
   }
   const models = cur.modelLevels.size;
-  const out = { growth: null, matched, models, onlyNow, onlyThen, touched };
+  const out = { growth: null, matched, models, onlyNow, onlyThen, moved, unlinked };
   if (matched < MIN_MATCHED_MODELS || matched < MIN_MATCHED_SHARE * models) return out;
-  // Untouched models stand on no particular measure, so across a change they
-  // compare on one; otherwise each quarter keeps its own.
+  // Linked levels all stand on the earlier measure; otherwise each quarter
+  // keeps its own, and basisGrowth refuses a pair that differ.
   const g = basisGrowth(
-    { value: sumNow / matched, basis: untouchedOnly ? BASIS_ORIGIN : cur.basis },
-    { value: sumThen / matched, basis: untouchedOnly ? BASIS_ORIGIN : prior.basis },
+    { value: sumNow / matched, basis: linked ? BASIS_ORIGIN : cur.basis },
+    { value: sumThen / matched, basis: linked ? BASIS_ORIGIN : prior.basis },
   );
   // + 0 turns a rounded -0 (float noise on an unchanged lineup) into 0, so a
   // lineup whose prices did not move can never print as a cut.
@@ -484,19 +490,33 @@ function likeForLikeNote(m, nowLabel, thenLabel, changeDate) {
   if (m.onlyThen) outside.push(modelsPhrase(m.onlyThen) + ' priced only in ' + thenLabel);
   const lead = 'Like-for-like: the ' + modelsPhrase(m.matched) + ' priced in both ' + thenLabel +
     ' and ' + nowLabel + ', each at its own average price in each quarter.';
-  // Across a change of measure the models it touched are left out too, and
-  // the note says so first: they are the reason this change is not simply the
-  // two averages'.
-  const acrossChange = m.touched
-    ? ' The source changed how it reports prices' + (changeDate ? ' on ' + changeDate : '') +
-      ', so the ' + modelsPhrase(m.touched) + ' that change touched ' +
-      (m.touched === 1 ? 'is' : 'are') + ' left out; the rest are reported the same way in both quarters.'
+  // Across the source's change of reporting, said first: it is why this
+  // change is not simply the two averages'.
+  const acrossChange = changeDate
+    ? ' The source changed how it reports prices on ' + changeDate + ', so ' +
+      (m.moved
+        ? 'the ' + modelsPhrase(m.moved) + ' it moved ' + (m.moved === 1 ? 'is' : 'are') +
+          ' compared at the price ' + (m.moved === 1 ? 'it' : 'they') + ' would have been reported at before it — the reported price times the exact factor of the change'
+        : 'every model here is compared as it was reported before it') +
+      (m.unlinked ? '; ' + modelsPhrase(m.unlinked) + ' first listed after it cannot be linked and ' + (m.unlinked === 1 ? 'is' : 'are') + ' left out' : '') +
+      '.'
     : '';
   return lead + acrossChange +
     (outside.length
       ? ' ' + outside.join(' and ') + (m.onlyNow + m.onlyThen === 1 ? ' is' : ' are') +
         ' left out of the change; each quarter\'s average price still includes them.'
-      : (m.touched ? '' : ' No model was added or dropped between them.'));
+      : (changeDate ? '' : ' No model was added or dropped between them.'));
+}
+
+/**
+ * What a usage-weighted change across the source's change of reporting rests
+ * on: the two quarters' weighted levels stand on different measures, so the
+ * figure is the like-for-like list-price change, linked across the change.
+ */
+function linkedWeightedNote(m, nowLabel, thenLabel, changeDate) {
+  return 'Across the source\'s change of reporting' + (changeDate ? ' on ' + changeDate : '') +
+    ' the usage-weighted prices of ' + thenLabel + ' and ' + nowLabel + ' stand on different measures, ' +
+    'so this is the like-for-like list-price change instead. ' + likeForLikeNote(m, nowLabel, thenLabel, changeDate);
 }
 
 /** Why a like-for-like change is blank, in words, for its tooltip. */
@@ -743,17 +763,18 @@ function buildMatrix(levelsBySlug, weighting, events, columns = PROVIDERS) {
   // (<key>Estimated, <key>Note), with the like-for-like list-price change
   // beside it as a cross-check.
   //
-  // Whether two quarters can be compared at all is decided in ONE place,
+  // Whether two quarters stand on one measure is decided in ONE place,
   // _model-price-basis.js: a quarter is on the changed measure if ANY model in
   // it was touched by the change, and the difference of two levels on
-  // different measures is refused — one touched $1.25 model among cheap
-  // untouched ones carries most of an equal-weighted $/token mean, so there is
-  // no share of touched models below which that difference stops being the
-  // artefact (Google's -19.5% for 2026-Q3 was 13 of its 29 models). The
-  // model-day view can still measure the change like-for-like on the models
-  // the change touched in neither quarter, when those are at least half the
-  // lineup; the weighted view has no per-model split to fall back on, so there
-  // the change stays refused.
+  // different measures is never taken — one touched $1.25 model among cheap
+  // untouched ones carries most of an equal-weighted $/token mean (Google's
+  // phantom -19.5% for 2026-Q3 was 13 of its 29 models). Instead the change is
+  // LINKED, like-for-like: each model the change moved enters at its reported
+  // price times the inverse of the change's exact factor, which is what the
+  // source would have reported before it. In both weightings — the weighted
+  // view's own levels cannot be linked (a weighted level is not one model's
+  // price), so across the change it takes the linked list-price change and
+  // says so. Refused only where too few models can be linked.
   const rowByQuarter = new Map(rows.map(r => [r.quarter, r]));
   const earliestQuarter = quarters[quarters.length - 1];
   const level = (c) => {
@@ -784,22 +805,32 @@ function buildMatrix(levelsBySlug, weighting, events, columns = PROVIDERS) {
         if (cur && !prior) {
           cell[key + 'Reason'] = noComparatorReason(then, earliestQuarter);
         } else if (isMeasureChange(cur, prior)) {
-          const m = weighting
-            ? null
-            : matchedModelGrowth(stats.get(row.quarter), stats.get(then), { untouchedOnly: true });
-          if (m && m.growth !== null) {
+          const m = matchedModelGrowth(stats.get(row.quarter), stats.get(then), { linked: true });
+          const changeDate = changeDateOf(cur, prior);
+          if (m.growth !== null) {
             growth = m.growth;
             cell[key + 'MatchedModels'] = m.matched;
-            cell[key + 'Note'] = likeForLikeNote(m, nowLabel, thenLabel, changeDateOf(cur, prior));
-          } else {
-            // Refused: a model the change moved cannot come back in, and too
-            // few it left alone remain to stand for the lineup.
+            cell[key + 'Linked'] = true;
+            cell[key + 'Note'] = weighting
+              ? linkedWeightedNote(m, nowLabel, thenLabel, changeDate)
+              : likeForLikeNote(m, nowLabel, thenLabel, changeDate);
+          } else if (m.unlinked && m.matched + m.unlinked >= MIN_MATCHED_MODELS &&
+                     m.matched + m.unlinked >= MIN_MATCHED_SHARE * m.models) {
+            // Refused BECAUSE of the change: enough models were priced in both
+            // quarters, but too many of them cannot be linked across it.
+            cell[key + 'MatchedModels'] = m.matched;
             cell[key + 'MeasureChanged'] = true;
             cell[key + 'Reason'] = measureChangeReason(cur, prior, thenLabel, events) +
-              (m ? ' Measuring it on the models the change did not touch was tried: ' +
-                (m.matched === 1 ? 'only 1 of them was' : 'only ' + m.matched + ' of them were') +
-                ' priced in both quarters, against ' + m.models + ' models priced in ' + nowLabel +
-                ' — too few to stand for the lineup.' : '');
+              ' Linking it like-for-like was tried: only ' + modelsPhrase(m.matched) +
+              ' priced in both quarters could be linked, against ' + m.models + ' priced in ' + nowLabel +
+              ' — too few to stand for the lineup.';
+          } else {
+            // Refused for the ordinary reason — too few models priced in both
+            // quarters — which linking cannot change. Said as such, not as a
+            // change of measure.
+            cell[key + 'MatchedModels'] = m.matched;
+            cell[key + 'TooFewMatched'] = true;
+            cell[key + 'Reason'] = tooFewMatchedReason(m, nowLabel, thenLabel);
           }
         } else if (growth !== null && !weighting) {
           const m = matchedModelGrowth(stats.get(row.quarter), stats.get(then));
@@ -1216,9 +1247,8 @@ async function buildProviderMatrix(request, metric, weight, group = 'company') {
         'licence) or proprietary (API-only), and each side is averaged ' +
         'equal-weighted across every (model, day) observation in the quarter. ' +
         'QoQ/YoY are like-for-like over the models priced in both quarters, as in ' +
-        'the by-company view; across the source\'s change of measure they compare ' +
-        'only the models it did not touch, and are not computed where those are ' +
-        'fewer than half of the quarter\'s models.'
+        'the by-company view, and linked across the source\'s change of reporting ' +
+        'at its exact factor.'
       : weight === 'usage'
       ? 'Prices come from pricepertoken.com\'s historical pricing API; weights ' +
         'come from OpenRouter\'s weekly per-model token volumes. Each model\'s ' +
@@ -1230,8 +1260,9 @@ async function buildProviderMatrix(request, metric, weight, group = 'company') {
         'times that ratio, reported with its basis and the reason the ' +
         'measurement was withheld. QoQ/YoY compare the figures shown, measured ' +
         'or estimated; a change resting on an estimate says so. Where the source ' +
-        'changed what it reports, each quarter averages one measure only and ' +
-        'QoQ/YoY across the change are not computed.'
+        'changed what it reports, each quarter averages one measure only, and ' +
+        'QoQ/YoY across the change are the like-for-like list-price change, each ' +
+        'model the change moved linked at its exact factor.'
       : 'Upstream is pricepertoken.com\'s own historical pricing API. ' +
         'Per-provider daily model prices are averaged equal-weighted across ' +
         'every (model, day) observation in each calendar quarter. No synthetic ' +
@@ -1241,9 +1272,9 @@ async function buildProviderMatrix(request, metric, weight, group = 'company') {
         'not read as a price move; they are not computed where fewer than two ' +
         'models, or fewer than half of the quarter\'s models, were priced in ' +
         'both. Where the source changed what it reports, each quarter averages ' +
-        'one measure only, and QoQ/YoY across the change compare only the models ' +
-        'it did not touch — not computed where those are fewer than half the ' +
-        'quarter\'s models.',
+        'one measure only, and QoQ/YoY across the change are linked: each model ' +
+        'the change moved is compared at its reported price times the change\'s ' +
+        'exact factor.',
     earliestDateObserved: earliestDate ? earliestDate.slice(0, 10) : null,
     // Every day on which the source changed what it reports, found from this
     // response's own rows, and the plain-words caption the matrix shows for

@@ -93,6 +93,7 @@ import {
   basisChangeForPeriods,
   pctChange,
 } from './_gpu-price-basis.js';
+import { loadWeeklySeries } from './_gpu-weekly-history.js';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -168,20 +169,28 @@ export function captureGapsFromSeries(series, skus) {
 
 export async function onRequestGet({ request, env }) {
   const kv = env?.HISTORY_KV;
-  if (!kv) {
-    return jsonResp(
-      { success: false, error: 'HISTORY_KV not bound' },
-      500,
-      'no-store'
-    );
-  }
-
   const url = new URL(request.url);
   const view = (url.searchParams.get('view') || 'daily').toLowerCase();
   const isQuarter = view === 'quarter' || view === 'quarterly';
   const isFinancial = view === 'financial' || view === 'correlation';
   const include = (url.searchParams.get('include') || 'real').toLowerCase();
   const keepAll = include === 'all';
+
+  // The investor views read getdeploying's own weekly history first: one
+  // measure across the whole year, where the captured snapshots switch from a
+  // floor to a median on 2026-07-28 and stop on 2026-09-16 (see
+  // _gpu-weekly-history.js). A GPU whose file cannot be read falls back to its
+  // captured snapshots below, so the matrix never goes blank for want of it.
+  // The daily view stays on the snapshots: it is the day-by-day record.
+  const weekly = (isQuarter || isFinancial) ? await loadWeeklySeries() : null;
+  const weeklyCoversAll = !!weekly && TRACKED_SKUS.every(s => weekly.series[s]);
+  if (!kv && !weeklyCoversAll) {
+    return jsonResp(
+      { success: false, error: 'HISTORY_KV not bound' },
+      500,
+      'no-store'
+    );
+  }
 
   // Window: daily default 60, quarter/financial default 400 (full cap).
   const windowParam = url.searchParams.get('window');
@@ -194,8 +203,9 @@ export async function onRequestGet({ request, env }) {
     windowDays = (isQuarter || isFinancial) ? 400 : 60;
   }
 
-  const index = (await kv.get('index:days', 'json')) || [];
-  if (!index.length) {
+  // Snapshots are read only for what the weekly history does not cover.
+  const index = weeklyCoversAll ? [] : ((await kv.get('index:days', 'json')) || []);
+  if (!index.length && !(weekly && Object.keys(weekly.series).length)) {
     if (isFinancial) return emptyFinancialResponse('no history yet');
     return emptyResponse('no history yet', isQuarter);
   }
@@ -267,6 +277,23 @@ export async function onRequestGet({ request, env }) {
 
   // Flip each series to chronological order (oldest → newest) for charts.
   for (const k of Object.keys(series)) series[k].reverse();
+
+  // The weekly history replaces a GPU's snapshot series wholesale — never
+  // merged day by day, which would put two sources' figures in one average.
+  // Tracking dates and the day count are then read off the series the views
+  // actually use.
+  if (weekly && Object.keys(weekly.series).length) {
+    for (const [sku, pts] of Object.entries(weekly.series)) {
+      series[sku] = pts;
+      latestBySku[sku] = pts[pts.length - 1];
+    }
+    const allDates = new Set();
+    for (const sku of TRACKED_SKUS) for (const p of series[sku] || []) allDates.add(p.date);
+    const sorted = Array.from(allDates).sort();
+    daysWithGPU = sorted.length;
+    trackingSince = trackingSinceReal = sorted[0] || null;
+    latestDate = latestRealDate = sorted[sorted.length - 1] || null;
+  }
 
   // Available SKUs — intersection of trackedSKUs and what we actually have data for.
   const availableSKUs = TRACKED_SKUS.filter(s => series[s] && series[s].length);
@@ -432,6 +459,7 @@ export async function onRequestGet({ request, env }) {
 
   if (isQuarter) {
     return buildQuarterResponse({
+      source: weekly?.source || null,
       series,
       latestBySku,
       trackingSinceReal,
@@ -447,6 +475,7 @@ export async function onRequestGet({ request, env }) {
 
   if (isFinancial) {
     return buildFinancialResponse({
+      source: weekly?.source || null,
       series,
       trackingSinceReal,
       latestRealDate,
@@ -620,7 +649,7 @@ function classifyQoQSignal(qoqPct, providerDelta) {
 
 function buildQuarterResponse(ctx) {
   const { series, latestBySku, trackingSinceReal, latestRealDate, trackingSince, latestDate,
-          daysWithGPU, availableSKUs, windowDays, include } = ctx;
+          daysWithGPU, availableSKUs, windowDays, include, source } = ctx;
   const today = new Date().toISOString().slice(0, 10);
 
   const quarterSeries = {};
@@ -693,6 +722,7 @@ function buildQuarterResponse(ctx) {
   return jsonResp({
     success: true,
     view: 'quarter',
+    source: source || { kind: 'captured-snapshots' },
     include,
     trackingSinceRealDate: trackingSinceReal,
     latestRealSnapshotDate: latestRealDate,
@@ -810,7 +840,8 @@ function avgOrNull(arr) {
 
 function buildFinancialResponse(ctx) {
   const { series, trackingSinceReal, latestRealDate, trackingSince, latestDate,
-          daysWithGPU, availableSKUs, windowDays, include } = ctx;
+          daysWithGPU, availableSKUs, windowDays, include, source } = ctx;
+  const weeklyOnly = !!source && !(source.fallbackSKUs || []).length;
   const today = new Date().toISOString().slice(0, 10);
   const todayMonthId = today.slice(0, 7);
   const { id: todayQuarterId } = quarterIdForDate(today);
@@ -1157,6 +1188,10 @@ function buildFinancialResponse(ctx) {
     success: true,
     view: 'financial',
     include,
+    // Where the figures come from: getdeploying's weekly history, with any
+    // GPU it could not serve falling back to captured snapshots (named in
+    // fallbackSKUs). Null when the history could not be read at all.
+    source: source || { kind: 'captured-snapshots' },
     dataQuality,
     trackingSinceRealDate: trackingSinceReal,
     latestRealSnapshotDate: latestRealDate,
@@ -1184,7 +1219,15 @@ function buildFinancialResponse(ctx) {
       yoy: yoyQuarter,
     },
     priceBasis: priceBasisInfo,
-    methodology: {
+    methodology: weeklyOnly ? {
+      avgBasis: 'weekly',
+      note:
+        'Figures are GetDeploying\'s weekly on-demand median $/hr across providers (CC-BY-4.0), ' +
+        'one measure throughout. Each week\'s figure covers its seven days, and a period average is ' +
+        'the mean over the period\'s days, so a week spanning two months counts in each by its days. ' +
+        'MoM/QoQ/YoY = (current period avg - prior period avg) / prior period avg x 100; a period ' +
+        'still in progress is not compared.',
+    } : {
       avgBasis: 'daily',
       note:
         'Period averages are arithmetic means of the daily headline price within the period. ' +

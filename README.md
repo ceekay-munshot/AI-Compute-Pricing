@@ -84,7 +84,8 @@ source actually changes.
 | `provider-pricing-matrix` | daily | 1 h | 1 h | 0 | **~2 h** |
 | `model-pricing-peer-matrix` | daily | 1 h | 1 h | 5 min | **~2 h** |
 | `gpu-hardware-pricing-data` | live scrape | — | 5 min | 0 | **~5 min** |
-| `gpu-hardware-pricing-history` | daily KV capture | — | — | 2 min | ~2 min |
+| `gpu-hardware-pricing-history` (daily view) | daily KV capture | — | — | 2 min | ~2 min |
+| `gpu-hardware-pricing-history` (financial, quarter) | getdeploying weekly dataset, updated daily | 3 h | — | 2 min | **~3 h** |
 | `pricing-share-signal` | daily KV capture | — | — | 10 min | ~10 min + its matrix |
 | the three embeds | third-party | — | — | 5 min | ~5 min |
 
@@ -277,35 +278,35 @@ landed — it serves the pricing-history chart and is now required.
 
 ---
 
-## The 2026-07-28 basis change — this is not a bug
+## The 2026-07-28 GPU basis change — solved at the source
 
 getdeploying.com changed its page layout on 2026-07-28. Before that date the
-GPU price for a day was the **floor** (cheapest vendor); from that date it is
-the **vendor median**. The long header comment in
+listing's price for a GPU was the **floor** (cheapest vendor); from that date it
+is the **vendor median**. No captured day carries both, so in the daily KV
+snapshots every period before the change could only be compared with periods
+before it — MoM/QoQ/YoY across July read *measure changed*, and the capture
+itself stopped on 2026-09-16 after a 20-day hole. The long header comment in
 `functions/api/_gpu-price-basis.js` has the full diagnosis.
 
-Live production, `$`/GPU-hour, monthly:
+The investor views (Financial Correlation, and the Infra tab's quarter view) now
+read getdeploying's **own weekly price history** instead —
+`/dataset/gpu-prices/<gpu>.json`, CC BY 4.0, the "Get the data" link under
+each GPU's price chart. It publishes a weekly on-demand min / median / max per
+GPU, and its median never changed meaning: H100 reads $2.99, $2.89, $2.99, $3.11
+through July 2026 with no step. Its `provider_median_price` is the figure the
+listing has shown since 2026-07-28 (H100 $3.34 against the listing's $3.40), so
+the views keep the measure they had after the change and gain it before.
+`functions/api/_gpu-weekly-history.js` applies each week to its seven days and
+feeds the existing period logic, so every rule downstream is unchanged and no
+period is ever a change of measure. A GPU whose file cannot be read falls back
+to its captured snapshots on its own (`source.fallbackSKUs`); the daily view
+stays on the snapshots.
 
-| SKU | Apr-26 | May-26 | Jun-26 | Jul-26 | Aug-26 | Sep-26 |
-|---|---|---|---|---|---|---|
-| H100 | $0.54 | $0.89 | $0.58 | $0.40 | $3.42 | $3.34 |
-| H200 | $0.36 | $0.82 | $0.97 | $0.96 | $4.40 | $4.38 |
-| B200 | $2.23 | $2.20 | $2.25 | $2.38 | $6.59 | $6.48 |
-| GB200 | $10.50 | $10.71 | $10.50 | $11.11 | $17.58 | $16.00 |
-| A100 | $0.14 | $0.16 | $0.21 | $0.14 | $1.87 | $1.79 |
-| L40S | $0.28 | $0.40 | $0.50 | $0.43 | $1.54 | $1.38 |
-| **basis** | floor | floor | floor | floor | **median** | **median** |
-
-`unpricedDays: 0`, `monthsMissing: []`. August is fully populated.
-
-**Apr–Jul and Aug–Sep are not comparable.** The Jul→Aug step is a change of
-unit, not a move in the market. `GPUFeedIntegrityBanner`, `renderFinBasisRow`
-and `finBasisBoundaryIndex` exist specifically to surface this seam, and the
-dashed boundary marker renders between Jul-26 and Aug-26.
-
-Do not interpolate across the boundary, hide it, smooth it, or rewrite stored
-KV snapshots. The table above is for verifying what the live API returns — it
-is never hardcoded into the app.
+**The free dataset is a trailing twelve months** (from 2025-09-22 today; the
+full history since 2024-07 is in getdeploying's paid API). As the window moves,
+the oldest weeks drop out, so YoY never has a full year-ago quarter to compare
+with from this file alone. To keep history and get YoY, the weekly figures need
+banking as they arrive — which belongs in google-dash, the store's sole writer.
 
 ---
 
@@ -328,15 +329,22 @@ diagnosis, and every model-price read goes through that module.
   every Gemma and all of Anthropic are untouched and compare normally. A model
   first listed on or after the date at Google or OpenAI (the GPT-5.6 family,
   Gemini 3.6 Flash) is placed on the new measure: nothing shows otherwise.
-- Each period averages ONE measure; QoQ / MoM / YoY across the change read
-  **measure changed**, and the pricing/share callouts cannot fire on them. The
-  one exception is the model-day provider matrix (and its open/proprietary
-  view): there the change is measured like-for-like on the models the change
-  touched in neither quarter, when those are at least half the lineup — OpenAI's
-  2026-Q3 QoQ rests on 50 untouched models; Google's, with 11 untouched of 29,
-  stays refused, and the hover says what was tried.
-- Prices after the change are shown exactly as reported (marked with a dagger), never
-  rescaled. `original_*` fields are not a fix: they never move.
+- Each period's LEVEL averages one measure, and prices after the change are
+  shown exactly as reported, marked with a dagger. `original_*` fields are not a
+  fix: they never move.
+- QoQ / MoM / YoY across the change are **linked**: each model the change moved
+  is compared at its reported price times the inverse of the change's exact
+  factor (x2), which is what the source would have reported before it — to the
+  cent, since the step was detected as exact. `linkOf` in
+  `_model-price-basis.js` gives every observation its link and every period its
+  earlier-measure level; the peer matrix, the frontier reference, the provider
+  matrix (like-for-like, both weightings) and the read-through all use it.
+  Google's 2026-Q3 QoQ is -0.1% over 24 models and OpenAI's 0.0% over 60,
+  where both used to read *measure changed*.
+- A model first listed after the change (GPT-5.6 Sol) has no earlier figure to
+  link to. A change resting on one still reads **measure changed** — today six
+  cells of OpenAI's frontier reference, where GPT-5.6 Sol took over from
+  GPT-5.5 Pro in July.
 
 ---
 
