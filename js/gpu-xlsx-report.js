@@ -365,6 +365,9 @@ function qualitySheet(fHist,skus){
 /* ─── Read me ─── */
 function readmeSheet(fHist,generatedAt){
   const dq=fHist.dataQuality||{};
+  // The financial view reads getdeploying's weekly history when it loads, and
+  // captured snapshots otherwise; the read-me describes whichever it got.
+  const weekly=fHist.source?.kind==="getdeploying-weekly"&&!(fHist.source.fallbackSKUs||[]).length;
   const rows=[];
   const t=title("GPU rental pricing — full export","Google / Gemini Tracking Dash · financial correlation view",4);
   rows.push(...t.rows);
@@ -375,13 +378,20 @@ function readmeSheet(fHist,generatedAt){
   item("Quarterly $ per hour","The same measures aggregated by calendar quarter. Quarter columns are labelled by quarter-end month (Mar/Jun/Sep/Dec).");
   item("MoM growth","Month-over-month and year-over-year change in the headline price, plus the price resilience signal. Blank across a change of measure.");
   item("QoQ growth","Quarter-over-quarter and year-over-year change in the headline price, plus the price resilience signal. Blank across a change of measure.");
-  item("Daily raw observations","Every captured day for every SKU — the source rows every average above is built from.");
+  item("Daily raw observations",weekly
+    ?"The daily snapshots captured from the listing page — a separate record kept alongside. The averages above use the weekly history, not these rows."
+    :"Every captured day for every SKU — the source rows every average above is built from.");
   item("Data quality","Feed status and per-period coverage. Start here.");
   rows.push([]);
 
   rows.push(section("How to read the numbers",4));
-  item("Price basis","The source changed what it publishes part-way through this history. Earlier periods carry the FLOOR of the vendor range (the single cheapest listing among the providers quoting that SKU that day) — not a market rate, and one outlier listing moves it. Later periods carry the MEDIAN across providers, which is a market rate. Every sheet states the basis per period, and growth is never computed across the change.");
-  item("Averaging","Period figures are arithmetic means of the daily values inside the calendar period, computed from daily observations directly rather than averaging monthly averages.");
+  if(weekly){
+    item("Price basis","Every figure is the weekly on-demand MEDIAN $/hr across the providers listing that GPU — one measure for the whole history, so every period compares with every other.");
+    item("Averaging","Each week's figure covers its seven days, and a period figure is the mean over the period's days, so a week spanning two months counts in each by its days.");
+  }else{
+    item("Price basis","The source changed what it publishes part-way through this history. Earlier periods carry the FLOOR of the vendor range (the single cheapest listing among the providers quoting that SKU that day) — not a market rate, and one outlier listing moves it. Later periods carry the MEDIAN across providers, which is a market rate. Every sheet states the basis per period, and growth is never computed across the change.");
+    item("Averaging","Period figures are arithmetic means of the daily values inside the calendar period, computed from daily observations directly rather than averaging monthly averages.");
+  }
   item("Growth","(current period average − prior period average) ÷ prior period average, stored as a real number so the cells stay arithmetic. Red = price rose, green = price fell — a buyer's cost lens. Invert the reading if you are looking at it as a vendor.");
   item("Suppression","Growth is blank for a period still in progress, and for any period with no price. Nothing is inferred or carried forward.");
   item("° marker","The reading rests on a period where under "+Math.round(LOW_COVERAGE*100)+"% of days carry a price.");
@@ -393,8 +403,13 @@ function readmeSheet(fHist,generatedAt){
   item("Tracking since",fHist.trackingSinceRealDate||"—");
   item("Latest GPU observation",dq.latestGPUObservationDate||"—");
   item("Latest priced observation",dq.latestPricedObservationDate||"—");
-  item("Snapshots included","Real captures only — synthetic and backfill snapshots are excluded.");
-  item("Source","getdeploying.com GPU vendor basket, captured daily and stored as immutable day snapshots.");
+  if(weekly){
+    item("Source","GetDeploying weekly GPU price history (getdeploying.com/gpus), licensed CC BY 4.0 — attribution: GetDeploying.");
+    item("Weeks","From "+(fHist.source.firstWeek||"—")+" to "+(fHist.source.latestWeek||"—")+"; last daily update "+(fHist.source.lastSnapshot||"—")+".");
+  }else{
+    item("Snapshots included","Real captures only — synthetic and backfill snapshots are excluded.");
+    item("Source","getdeploying.com GPU vendor basket, captured daily and stored as immutable day snapshots.");
+  }
 
   if(dq.gpuFeedStale||dq.priceFieldStale){
     rows.push([]);
@@ -419,7 +434,7 @@ export function buildGPUPricingWorkbook(fHist,daily,skus){
 
   if(mLabels.length)sheets.push(levelsSheet(
     "Monthly $ per hour","GPU rental $ per hour — by model, by month",
-    "Period averages of daily observations · headline / floor / midpoint / ceiling · generated "+generatedAt,
+    (fHist.source?.kind==="getdeploying-weekly"?"Period averages of the weekly median":"Period averages of daily observations")+" · headline / floor / midpoint / ceiling · generated "+generatedAt,
     mLabels,mSeries,skus,"isMTD"));
 
   if(qLabels.length)sheets.push(levelsSheet(

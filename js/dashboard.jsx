@@ -1440,7 +1440,10 @@ function ModelPricingMatrixTable(){
         const val=rep[key]?.[p.id];
         const measureWhy=val==null?rep.measureChanged?.[key]?.[p.id]:null;
         const listingWhy=val==null&&!measureWhy?rep.listingChanged?.[key]?.[p.id]:null;
-        const why=measureWhy||listingWhy||(val==null&&isYoY(key)&&!hasYearAgo(p.id)?noYearAgoWhy:null);
+        // A change taken across the source's change of reporting, linked at its
+        // exact factor, says so on hover.
+        const linkedWhy=val!=null?rep.linkedChange?.[key]?.[p.id]:null;
+        const why=measureWhy||listingWhy||linkedWhy||(val==null&&isYoY(key)&&!hasYearAgo(p.id)?noYearAgoWhy:null);
         return(<td key={p.id} style={{...tdDim,...bStyle(i)}} title={why||undefined}>{measureWhy?measureChangedTag():listingWhy?listingChangedTag():fmtChange(val)}</td>);
       })}
     </tr>
@@ -1580,8 +1583,9 @@ function ModelPricingMatrixTable(){
                               );
                             }
                             const why=val==null?row.measureChanged?.[section.key]?.[p.id]:null;
+                            const linkedWhy=val!=null?row.linkedChange?.[section.key]?.[p.id]:null;
                             return(
-                              <td key={p.id} style={{...tdDim,...bStyle(i)}} title={why||undefined}>
+                              <td key={p.id} style={{...tdDim,...bStyle(i)}} title={why||linkedWhy||undefined}>
                                 {why?measureChangedTag():fmtChange(val)}
                               </td>
                             );
@@ -1599,7 +1603,7 @@ function ModelPricingMatrixTable(){
 
       <div style={{fontSize:10,color:"#9ca3af",lineHeight:1.5,marginTop:6}}>
         <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> Prices use pricepertoken historical model-level rows, averaged by {G.bucketWord} and shown as $/1M tokens. {G.chgLabel}/YoY compare only valid full historical periods; {G.partialBadge} growth is suppressed. Fixed representative models keep growth math comparable; the Frontier Reference shows how the latest frontier label — and its price — change by period. Alternate-billing SKUs (<code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:batch</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:beta</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>:thinking</code>) and sibling product lines (GPT-5 Pro vs GPT-5, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>-customtools</code>, <code style={{fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace"}}>-fast</code>) are excluded from every average — each would otherwise register as a price move when only the upstream catalog changed. Each row is priced from the model's own listing; a dated snapshot the source prices differently from the model itself is a separate SKU and is left out (hover the model name), and {G.chgLabel}/YoY compare only the listings both periods carry, so a listing arriving or leaving never reads as a price move. Firecrawl is used only as an advisory model-discovery signal, never for pricing math.
-        {data.measureBreaks?.summary&&<> Where the source changed what it reports mid-history (the dashed rule), each period averages one measure only; {G.chgLabel}/YoY across the change read <span style={{color:"#b45309",fontWeight:600}}>measure changed</span> rather than a percentage, and a price reported after it carries a <sup style={{color:"#b45309",fontWeight:700}}>&dagger;</sup>.</>}
+        {data.measureBreaks?.summary&&<> Where the source changed what it reports mid-history (the dashed rule), each period averages one measure only, and a price reported after it carries a <sup style={{color:"#6b7280",fontWeight:700}}>&dagger;</sup>. {G.chgLabel}/YoY across the change compare like with like: each model the change moved is compared at its reported price times the exact factor of the change (hover the cell). Only a model first listed after it cannot be linked, and reads <span style={{color:"#6b7280",fontWeight:600}}>measure changed</span>.</>}
       </div>
     </div>
   );
@@ -1837,6 +1841,9 @@ function GPUHardwarePricingTab(){
   // stated as a plain date range in the header, so the history is never taken
   // for a current reading. The server decides when it counts as stopped.
   const gdq=fHist?.dataQuality;
+  // The investor views read getdeploying's weekly history when it loads (see
+  // functions/api/_gpu-weekly-history.js); the wording follows the source.
+  const gpuWeekly=fHist?.source?.kind==="getdeploying-weekly";
   const gpuThrough=gdq?.gpuFeedStale?gdq.latestGPUObservationDate:gdq?.priceFieldStale?gdq.latestPricedObservationDate:null;
   const listingAt=data?Date.parse(data.fetchedAt):NaN;
 
@@ -1848,8 +1855,9 @@ function GPUHardwarePricingTab(){
       <div style={{marginBottom:10}}>
         <div style={{fontSize:16,fontWeight:700,color:"#111827",lineHeight:1.3}}>GPU Hardware Pricing</div>
         <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>
-          Two lenses on the same strategic GPU basket · daily snapshots {gpuThrough?"from":"captured since"} <b style={{color:"#6b7280",fontWeight:600}}>{fHist?.trackingSinceRealDate||"—"}</b>
+          Two lenses on the same strategic GPU basket · {gpuWeekly?"price history":"daily snapshots"} {gpuThrough?"from":"since"} <b style={{color:"#6b7280",fontWeight:600}}>{fHist?.trackingSinceRealDate||"—"}</b>
           {gpuThrough&&<>{" to "}<b style={{color:"#6b7280",fontWeight:600}}>{gpuThrough}</b></>}
+          {gpuWeekly&&<>{" · "}source: <a href="https://getdeploying.com/gpus" target="_blank" rel="noopener noreferrer" style={{color:"#6b7280"}}>GetDeploying</a> (CC BY 4.0)</>}
         </div>
       </div>
 
@@ -1893,6 +1901,7 @@ function GPUHardwarePricingTab(){
    - Secondary rows (A100/GB200/L40S) behind "Show more" expansion
 ═══════════════════════════════════════════════════════ */
 function GPUFinancialSubtab({fHist,fHistErr}){
+  const weekly=fHist?.source?.kind==="getdeploying-weekly";
   return(
     <>
       {/* Section label */}
@@ -1905,7 +1914,9 @@ function GPUFinancialSubtab({fHist,fHistErr}){
       <div style={{marginBottom:12}}>
         <div style={{fontSize:14,fontWeight:700,color:"#111827",lineHeight:1.3}}>Period-average GPU pricing for equity correlation</div>
         <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>
-          Arithmetic mean of the daily headline price by calendar period — real historical GPU pricing only, no estimates.
+          {weekly
+            ?"Mean of the weekly on-demand median $/hr across providers, by calendar period — one measure throughout, no estimates."
+            :"Arithmetic mean of the daily headline price by calendar period — real historical GPU pricing only, no estimates."}
         </div>
       </div>
 
@@ -2432,8 +2443,10 @@ function afterChangeTitle(basis,left){
 function MeasureBreakCaption({mb}){
   const s=mb?.summary;
   if(!s)return null;
+  // Neutral, not amber: growth is linked across the change now, so this is
+  // context for the dagger on later prices, not a warning about the figures.
   return(
-    <div style={{background:"#fffbeb",border:"0.5px solid #fde68a",borderRadius:6,padding:"8px 11px",marginBottom:8,fontSize:11,color:"#92400e",lineHeight:1.55}}>
+    <div role="note" style={{background:"#f9fafb",border:"0.5px solid #e5e7eb",borderRadius:6,padding:"8px 11px",marginBottom:8,fontSize:11,color:"#4b5563",lineHeight:1.55}}>
       <b style={{fontWeight:700}}>{s.headline}</b>{" "}{s.detail}{" "}
       A <sup style={{fontWeight:700}}>&dagger;</sup> marks a price reported after the change.
     </div>
@@ -2574,7 +2587,7 @@ function GPUFinancialCorrelationBlock({fHist,fHistErr}){
     const bases=new Set(Object.values(basisByPeriod).filter(b=>b&&b!=="mixed"));
     if(bases.size===1)return FIN_BASIS_LABEL[[...bases][0]];
     if(bases.size>1)return "the source changed measure mid-history — see the row below each column";
-    return "period averages of daily $/hr";
+    return effFHist.source?.kind==="getdeploying-weekly"?"period averages of the weekly median $/hr":"period averages of daily $/hr";
   })();
 
   const pricedPeriodCount=periods.filter(p=>
@@ -2600,7 +2613,7 @@ function GPUFinancialCorrelationBlock({fHist,fHistErr}){
           })}
         </div>
         <span style={{fontSize:10,color:"#9ca3af",flex:1,minWidth:0}}>
-          Analyst lens · period averages of daily $/hr · quarter labels = quarter-end month (Mar/Jun/Sep/Dec) · levels are comparable only within one measure
+          Analyst lens · {effFHist.source?.kind==="getdeploying-weekly"?"period averages of the weekly on-demand median $/hr across providers":"period averages of daily $/hr"} · quarter labels = quarter-end month (Mar/Jun/Sep/Dec){effFHist.priceBasis?.hasChange?" · levels are comparable only within one measure":""}
         </span>
 
         {/* Export. Disabled while the illustrative preview is on — those
@@ -3097,7 +3110,7 @@ function GPUHistoryShell({histView,setHistView,qHist,qHistErr,hist,histErr}){
           })}
         </div>
         <span style={{fontSize:10,color:"#9ca3af"}}>
-          Investor lens · daily snapshots aggregated by calendar quarter (Q1 Jan–Mar, Q2 Apr–Jun, Q3 Jul–Sep, Q4 Oct–Dec UTC)
+          Investor lens · {qHist?.source?.kind==="getdeploying-weekly"?"weekly on-demand medians":"daily snapshots"} aggregated by calendar quarter (Q1 Jan–Mar, Q2 Apr–Jun, Q3 Jul–Sep, Q4 Oct–Dec UTC)
         </span>
       </div>
       {histView==="quarter"
@@ -3327,7 +3340,9 @@ function GPUQuarterlyBlock({qHist,qHistErr}){
 
       {/* Methodology note */}
       <div style={{fontSize:10,color:"#9ca3af",lineHeight:1.5,marginBottom:4}}>
-        <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> QoQ uses quarter-close values (last real snapshot in the quarter). Quarter averages are computed across all real snapshots in the quarter and surfaced separately — they do not replace close-to-close. Coverage = distinct real snapshot days / calendar days in the quarter (QTD quarters use elapsed days only). Synthetic/backfill-only validation points are excluded.
+        <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> {qHist?.source?.kind==="getdeploying-weekly"
+          ?"Prices are GetDeploying's weekly on-demand median $/hr across providers (CC BY 4.0), one measure throughout. QoQ uses quarter-close values (the latest week in the quarter). Quarter averages are the mean over the quarter's days, each week counting for the days it covers, and are surfaced separately — they do not replace close-to-close. Coverage = days with a published week / calendar days in the quarter (QTD quarters use elapsed days only)."
+          :"QoQ uses quarter-close values (last real snapshot in the quarter). Quarter averages are computed across all real snapshots in the quarter and surfaced separately — they do not replace close-to-close. Coverage = distinct real snapshot days / calendar days in the quarter (QTD quarters use elapsed days only). Synthetic/backfill-only validation points are excluded."}
       </div>
     </div>
   );

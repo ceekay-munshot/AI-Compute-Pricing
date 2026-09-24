@@ -9,9 +9,9 @@
  * taken only between two MEASURED levels, so every change touching an
  * estimate was dropped. Growth now follows the figure the Avg view shows.
  *
- * Alongside it: the open/proprietary view (group=openness), and a model-day
- * change across the source's 2026-07-10 change of measure, measured on the
- * models that change did not touch when they are at least half the lineup.
+ * Alongside it: the open/proprietary view (group=openness), and changes
+ * across the source's 2026-07-10 change of measure, linked at its exact
+ * factor so both quarters stand on one measure.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -120,9 +120,9 @@ test('group=openness is list prices only, and a bad group is refused', async () 
   assert.equal(bad.status, 400);
 });
 
-/* ── Across a change of measure, on the models it did not touch ───────── */
+/* ── Across a change of measure, linked at its exact factor ─────────── */
 
-test('a change across the source\'s change of measure is measured on the untouched models', async () => {
+test('a change across the source\'s change of measure is linked, and a real cut still shows', async () => {
   const halve = (m, p) => hist(m, [[S, '2026-07-09', p], ['2026-07-10', E, p / 2]]);
   const { body: d } = await matrix('metric=input', {
     // Five models halve on 2026-07-10 — the change of measure — and six do
@@ -132,8 +132,7 @@ test('a change across the source\'s change of measure is measured on the untouch
       ...['u1', 'u2', 'u3', 'u4', 'u5'].map(m => hist('gpt-' + m, [[S, E, 1e-6]])).flat(),
       ...hist('gpt-u6', [[S, Q2_END, 2.5e-6], [Q3_START, E, 2e-6]]),
     ],
-    // Five touched and one untouched: the untouched are too few to stand for
-    // the lineup, so the change stays refused.
+    // Five halve and one does not: all six link, and nothing moved.
     google: [
       ...['a', 'b', 'c', 'd', 'e'].map((m, i) => halve('gemini-' + m, (i + 1) * 2e-7)).flat(),
       ...hist('gemma-x', [[S, E, 3e-8]]),
@@ -141,15 +140,45 @@ test('a change across the source\'s change of measure is measured on the untouch
   });
   assert.deepEqual(d.measureBreaks.events.map(e => e.effectiveDate), ['2026-07-10']);
   const q3 = cellsOf(d, '2026-Q3');
+  // Halved models enter at their Q2 prices ($0.4 + 0.8 + 1.2 + 1.6 + 2.0 = 6.0
+  // per 1M); the untouched five at $1 and the real cut $2.50 -> $2.00.
+  assert.equal(q3.openai.qoq, round3((6 + 5 + 2) / (6 + 5 + 2.5) - 1));
+  assert.equal(q3.openai.qoqLinked, true);
+  assert.equal(q3.openai.qoqMatchedModels, 11);
   assert.equal(q3.openai.qoqMeasureChanged, undefined);
-  assert.equal(q3.openai.qoqMatchedModels, 6);
-  assert.equal(q3.openai.qoq, round3(7 / 7.5 - 1));
-  assert.match(q3.openai.qoqNote, /the 5 models that change touched are left out/);
+  assert.match(q3.openai.qoqNote, /the 5 models it moved are compared at the price they would have been reported at before it/);
 
-  assert.equal(q3.google.qoq, null);
-  assert.equal(q3.google.qoqMeasureChanged, true);
-  assert.match(q3.google.qoqReason, /^Not comparable/);
-  assert.match(q3.google.qoqReason, /only 1 of them was priced in both quarters, against 6 models/);
+  assert.equal(q3.google.qoq, 0);
+  assert.equal(q3.google.qoqLinked, true);
+  assert.equal(q3.google.qoqMatchedModels, 6);
+
+  // The level itself is still what the source reports: the halved figures.
+  assert.ok(q3.google.avg < cellsOf(d, '2026-Q2').google.avg * 0.6);
+});
+
+test('a model first listed after the change cannot be linked, and too few linkable models refuse', async () => {
+  const { body: d } = await matrix('metric=input', {
+    google: [
+      // Five halve (the change), and three are listed after it: Q3's lineup is
+      // 8, of which 5 are priced in both quarters — enough, and linked.
+      ...['a', 'b', 'c', 'd', 'e'].map((m, i) => hist('gemini-' + m, [[S, '2026-07-09', (i + 1) * 2e-7], ['2026-07-10', E, (i + 1) * 1e-7]])).flat(),
+      ...['n1', 'n2', 'n3'].map(m => hist('gemini-' + m, [['2026-07-15', E, 3e-7]])).flat(),
+    ],
+    openai: [
+      // Five halve, and seven are listed after it: 5 of 12 priced in both —
+      // too few whatever the measure, so refused as a lineup change.
+      ...['a', 'b', 'c', 'd', 'e'].map((m, i) => hist('gpt-' + m, [[S, '2026-07-09', (i + 1) * 4e-7], ['2026-07-10', E, (i + 1) * 2e-7]])).flat(),
+      ...['n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7'].map(m => hist('gpt-' + m, [['2026-07-15', E, 1e-6]])).flat(),
+    ],
+  });
+  const q3 = cellsOf(d, '2026-Q3');
+  assert.equal(q3.google.qoq, 0);
+  assert.equal(q3.google.qoqMatchedModels, 5);
+  assert.match(q3.google.qoqNote, /3 models priced only in Q3 2026/);
+  assert.equal(q3.openai.qoq, null);
+  assert.equal(q3.openai.qoqMeasureChanged, undefined, 'the lineup turned over — not a change of measure');
+  assert.equal(q3.openai.qoqTooFewMatched, true);
+  assert.match(q3.openai.qoqReason, /only 5 of the 12 models priced in Q3 2026 were also priced in Q2 2026/);
 });
 
 test('a change with nothing to compare against says so', async () => {
@@ -171,14 +200,19 @@ test('a change with nothing to compare against says so', async () => {
 
 const round3 = (n) => Math.round(n * 1000) / 1000;
 
-/** One provider-quarter's model-day level, as providerQuarterLevels builds it. */
+/**
+ * One provider-quarter's model-day level, as providerQuarterLevels builds it.
+ * On a changed measure every model here is one the change halved, so its
+ * earlier-measure level is twice the reported one.
+ */
 function level(models, basis = 'origin') {
   const modelLevels = new Map(Object.entries(models));
   const prices = [...modelLevels.values()];
+  const modelLinked = new Map([...modelLevels].map(([m, v]) => [m, basis === 'origin' ? v : v * 2]));
   return {
     mean: prices.reduce((a, b) => a + b, 0) / prices.length,
     n: prices.length * 90, basis, models: new Set(modelLevels.keys()),
-    excludedN: 0, modelLevels, touched: new Set(basis === 'origin' ? [] : modelLevels.keys()),
+    excludedN: 0, modelLevels, modelLinked,
   };
 }
 const weights = (entries) => new Map(Object.entries(entries).map(([m, [tokens, price]]) => [m, { tokens, cost: tokens * price }]));
@@ -224,9 +258,12 @@ test('usage-weighted QoQ/YoY are taken from the level shown, estimates included'
   assert.match(q3.cohere.qoqNote, /Both are estimates/);
   assert.match(q3.cohere.qoqNote, /the same ratio in both/);
 
-  // A change of measure is refused in the weighted view even between estimates.
-  assert.equal(q3.google.qoq, null);
-  assert.equal(q3.google.qoqMeasureChanged, true);
+  // Across a change of measure the weighted levels cannot be compared, so the
+  // change is the linked like-for-like list-price one, and says so.
+  assert.equal(q3.google.qoq, 0);
+  assert.equal(q3.google.qoqLinked, true);
+  assert.equal(q3.google.qoqMeasureChanged, undefined);
+  assert.match(q3.google.qoqNote, /stand on different measures, so this is the like-for-like list-price change instead/);
 
   // Q2 has nothing before it.
   assert.equal(q2.anthropic.qoq, null);

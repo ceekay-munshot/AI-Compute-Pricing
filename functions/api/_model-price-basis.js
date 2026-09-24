@@ -95,8 +95,16 @@
  *            nothing. Untouched models always count. Nothing is rescaled: a
  *            figure after the change is exactly what the source now reports.
  *   Growth   QoQ, MoM and YoY between periods on different measures are
- *            refused and carry a reason. Within one side they are computed
- *            exactly as before.
+ *            LINKED: a model the change moved is compared at its reported
+ *            price times the inverse of the exact factor the change applied
+ *            to it (x2 for 2026-07-10), which is its figure on the earlier
+ *            measure to the cent — the step was detected as exact. Each
+ *            observation carries that link (linkOf), each period its
+ *            earlier-measure level (`linked`), and growth across the change
+ *            is taken between those. A model first listed after the change
+ *            has no earlier figure to link to, so a period resting on one
+ *            still refuses growth across the change, with a reason. Within
+ *            one side growth is computed exactly as before.
  *
  * This is a read-time classification of the rows as received. Nothing is
  * stored or rewritten anywhere.
@@ -391,6 +399,23 @@ export function buildBasisBook(providerResults, metric) {
       if (!t || !day) return null;
       return basisAt(t.segments, day);
     },
+    /**
+     * What one observation's price must be multiplied by to put it on the
+     * earlier (origin) measure: 1 for an untouched model or a day before its
+     * change; the inverse of the change's exact factor for a model the change
+     * MOVED (x2 for a halving); null for a model first listed after the
+     * change, which the source never reported the earlier way. One change
+     * deep — no model in the history has moved twice.
+     */
+    linkOf(slug, model, day) {
+      const t = timelines.get(slug)?.get(model);
+      if (!t || !day) return 1;
+      const b = basisAt(t.segments, day);
+      if (b === BASIS_ORIGIN) return 1;
+      if (!t.changes.some(c => c.kind === 'moved' && c.basis === b)) return null;
+      const ev = events.find(e => e.effectiveDate === b);
+      return ev && ev.factor > 0 ? 1 / ev.factor : null;
+    },
     touchedModels(slug) {
       return Array.from(timelines.get(slug) || [], ([model, t]) => ({ model, changes: t.changes }));
     },
@@ -400,7 +425,9 @@ export function buildBasisBook(providerResults, metric) {
 /* ── Period levels on one measure ──────────────────────────────────────── */
 
 function slot() {
-  return { sum: 0, n: 0, models: new Set() };
+  // linkedSum: the same observations on the origin measure (see linkOf);
+  // unlinked: how many had no link, which makes the period's linked level null.
+  return { sum: 0, n: 0, models: new Set(), linkedSum: 0, unlinked: 0 };
 }
 
 /** An empty accumulator for one period's observations. */
@@ -419,15 +446,21 @@ export function tallyFor(map, key) {
  * Add one observation. `basis` is what basisOf() returned for it: null for an
  * untouched model, otherwise the measure that model was on that day.
  */
-export function addToTally(tally, basis, value, model) {
+export function addToTally(tally, basis, value, model, link) {
   let s;
-  if (basis == null) s = tally.neutral;
+  // No link given: an observation on the origin measure (or untouched) needs
+  // none; one on a changed measure is left unlinked, so growth across the
+  // change is refused rather than taken at face value.
+  if (link === undefined) link = basis == null || basis === BASIS_ORIGIN ? 1 : null;
+  if (basis == null) { s = tally.neutral; link = 1; }
   else {
     s = tally.byBasis.get(basis);
     if (!s) tally.byBasis.set(basis, (s = slot()));
   }
   s.sum += value;
   s.n += 1;
+  if (link == null) s.unlinked += 1;
+  else s.linkedSum += value * link;
   if (model != null) s.models.add(model);
 }
 
@@ -437,6 +470,8 @@ export function mergeTallies(tallies) {
   const into = (dst, src) => {
     dst.sum += src.sum;
     dst.n += src.n;
+    dst.linkedSum += src.linkedSum || 0;
+    dst.unlinked += src.unlinked || 0;
     for (const m of src.models) dst.models.add(m);
   };
   for (const t of tallies || []) {
@@ -491,7 +526,13 @@ export function resolveTally(tally) {
     excludedN += s.n;
     for (const m of s.models) excludedModels.add(m);
   }
-  return { mean: n ? sum / n : null, n, basis, models, excludedN, excludedModels };
+  // The same observations on the origin measure, or null if any of them
+  // cannot be linked there (a model listed after the change).
+  const unlinked = tally.neutral.unlinked + (chosen ? chosen.unlinked : 0);
+  const linkedMean = n && !unlinked
+    ? (tally.neutral.linkedSum + (chosen ? chosen.linkedSum : 0)) / n
+    : null;
+  return { mean: n ? sum / n : null, n, basis, models, excludedN, excludedModels, linkedMean };
 }
 
 /**
@@ -515,7 +556,8 @@ export function resolvePeriodTallies(tallies, scale = 1_000_000) {
     const r = resolveTally(t);
     const v = r.mean === null ? null : round3(r.mean * scale);
     values[pid] = v;
-    levels[pid] = { value: v, basis: r.basis };
+    // `linked` is unrounded: growth across a change divides two of them.
+    levels[pid] = { value: v, basis: r.basis, linked: r.linkedMean === null ? null : r.linkedMean * scale };
     if (r.basis !== BASIS_ORIGIN) basis[pid] = r.basis;
     if (r.excludedN > 0) excluded[pid] = r.excludedN;
     n[pid] = r.n;
@@ -552,6 +594,38 @@ export function basisGrowth(cur, prior) {
   if (!hasLevel(cur) || !hasLevel(prior) || !(prior.value > 0)) return null;
   if (isMeasureChange(cur, prior)) return null;
   return round3((cur.value - prior.value) / prior.value);
+}
+
+/**
+ * Growth between two periods on DIFFERENT measures, taken between their
+ * origin-measure levels (resolveTally's linkedMean). Null unless both periods
+ * could be linked there.
+ */
+export function linkedGrowth(cur, prior) {
+  if (!isMeasureChange(cur, prior)) return null;
+  const a = cur?.linked, b = prior?.linked;
+  if (!isNum(a) || !isNum(b) || !(b > 0)) return null;
+  // + 0: an unchanged price across the change must print 0.0%, never -0.0%.
+  return round3((a - b) / b) + 0;
+}
+
+/** What a linked change rests on, in words, for its tooltip. */
+export function linkedChangeNote(cur, prior, priorLabel, events) {
+  const a = cur?.basis || BASIS_ORIGIN;
+  const b = prior?.basis || BASIS_ORIGIN;
+  const dated = [a, b].filter(x => x !== BASIS_ORIGIN).sort();
+  const date = dated[dated.length - 1] || null;
+  const ev = (events || []).find(e => e.effectiveDate === date) || null;
+  const [what, how] = !ev
+    ? ['changed the figure it reports', 'at the reported price times the exact factor of that change']
+    : ev.direction === 'halved'
+      ? ['cut the figure it reports to exactly half', 'at twice the reported price']
+      : ['doubled the figure it reports', 'at half the reported price'];
+  return (
+    'Measured across the source\'s change of reporting' + (date ? ' on ' + date : '') +
+    ', which ' + what + ': compared ' + how + ' — the exact factor of that change — so this and ' +
+    (priorLabel || 'the prior period') + ' stand on one basis.'
+  );
 }
 
 /** 'YYYY-Qn' -> 'Qn YYYY'; 'YYYY-MM' -> 'Mon YYYY'. */
@@ -614,6 +688,7 @@ export function sparse(byField) {
 export function growthSeries(levels, priorOf, { skip = null, events = [] } = {}) {
   const growth = {};
   const measureChanged = {};
+  const linked = {};
   for (const pid of Object.keys(levels || {})) {
     if (pid === skip) continue;
     const ppid = priorOf(pid);
@@ -622,10 +697,18 @@ export function growthSeries(levels, priorOf, { skip = null, events = [] } = {})
     const g = basisGrowth(cur, prior);
     if (g !== null) growth[pid] = g;
     else if (isMeasureChange(cur, prior)) {
-      measureChanged[pid] = measureChangeReason(cur, prior, periodLabel(ppid), events);
+      const lg = linkedGrowth(cur, prior);
+      if (lg !== null) {
+        growth[pid] = lg;
+        linked[pid] = linkedChangeNote(cur, prior, periodLabel(ppid), events);
+      } else {
+        measureChanged[pid] = measureChangeReason(cur, prior, periodLabel(ppid), events) +
+          ' It cannot be linked across that change either: a model here was first listed after it, ' +
+          'so the source never reported it the earlier way.';
+      }
     }
   }
-  return { growth, measureChanged };
+  return { growth, measureChanged, linked };
 }
 
 /* ── The explanation a reader sees ─────────────────────────────────────── */
@@ -667,6 +750,9 @@ export function describeMeasureBreaks(eventLists, labelOf = s => s) {
     headline: 'The source changed how it reports prices on ' + dates + '.',
     detail:
       sentences.join(' ') +
-      ' Prices from then on are shown exactly as the source now reports them. Growth comparing a period before the change with one after it is not computed and reads measure changed; models the change did not touch compare as normal.',
+      ' Prices from then on are shown exactly as the source now reports them. Growth across the change ' +
+      'compares like with like: each model the change moved is compared at ' +
+      (evs.every(e => e.direction === 'halved') ? 'twice' : evs.every(e => e.direction === 'doubled') ? 'half' : 'the inverse of') +
+      ' its reported price, the exact factor the change applied. Only a figure resting on a model first listed after the change cannot be linked, and reads measure changed.',
   };
 }
