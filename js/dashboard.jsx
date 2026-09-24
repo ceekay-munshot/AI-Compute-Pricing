@@ -697,11 +697,15 @@ function PricingShareSignalBlock(){
    /api/provider-pricing-matrix which fans out to pricepertoken's own
    historical pricing API per provider and bucketizes into calendar
    quarters (equal-weighted daily mean of input/output $/1M tokens).
+   "Open vs proprietary" asks the same endpoint for group=openness: two
+   columns, every lab's models classed open-weight or proprietary per model
+   (functions/api/_model-openness.js), plus the open-weight discount.
 
    Honesty:
      - Real upstream floor is ~2025-07-28. No synthetic 2023 data.
      - YoY is empty for every quarter until a real year-ago quarter
-       exists upstream — shown as em dash, never fabricated.
+       exists upstream — shown as em dash with the reason on hover, never
+       fabricated.
      - Per-cell model count is surfaced so the reader can judge
        composition drift.
 ═══════════════════════════════════════════════════════ */
@@ -832,14 +836,34 @@ function useEmbedBucket(){
   return bucket;
 }
 
+/* The segmented controls in the pricing-history block. Inline styles cannot
+   carry :active or :hover, so the press feedback lives here: an instant
+   scale on press, a darker label on hover where a real pointer can hover, and
+   a visible focus ring for keyboard use. Nothing moves under reduced motion. */
+const SEG_CSS=`.mph-seg button{transition:transform 160ms cubic-bezier(0.23,1,0.32,1)}
+.mph-seg button:active{transform:scale(0.97)}
+.mph-seg button:focus-visible{outline:2px solid #0e7490;outline-offset:1px;position:relative;z-index:1}
+@media (hover:hover) and (pointer:fine){.mph-seg button[aria-pressed="false"]:hover{color:#111827!important}}
+@media (prefers-reduced-motion:reduce){.mph-seg button{transition:none}.mph-seg button:active{transform:none}}`;
+
 function ModelPricingHistoryBlock(){
   const[metric,setMetric]=useState("input");
   const[view,setView]=useState("avg"); // "avg" | "qoq" | "yoy"
+  // "company"  — one column per provider.
+  // "openness" — two columns: proprietary (API-only) models against open-weight
+  // ones (weights published to download), classed per model across every lab.
+  const[group,setGroup]=useState("company");
   // "equal" — every model in a provider's lineup counts once (list-price mean).
   // "usage" — each model counts in proportion to the tokens it actually served,
   // so the cell reads as what the market paid. The server replaces `avg` with
   // the weighted level, so the chart, matrix and QoQ/YoY all follow one series.
-  const[weight,setWeight]=useState("equal");
+  // The open/proprietary view is list prices only: a provider's OpenRouter
+  // total cannot be split into its open and proprietary models, so there is no
+  // denominator to certify a weighted open-weight figure against. The chosen
+  // weighting is kept for when the reader switches back.
+  const[weightChoice,setWeight]=useState("equal");
+  const openness=group==="openness";
+  const weight=openness?"equal":weightChoice;
   const[state,setState]=useState({phase:"loading",data:null,error:null});
 
   const {dataTick}=useContext(DataRefreshContext);
@@ -852,7 +876,7 @@ function ModelPricingHistoryBlock(){
   const health=useUpdateHealth(); // see AUTO-REFRESH
   useEffect(()=>{
     let cancelled=false;
-    const key=metric+"|"+weight;
+    const key=metric+"|"+weight+"|"+group;
     const background=shownKey.current===key;
     if(!background) setState(s=>({...s,phase:"loading"}));
     // Keyed on the build hash, never on the clock. This endpoint fans out to
@@ -864,7 +888,7 @@ function ModelPricingHistoryBlock(){
     // Now that the endpoint sits behind the edge cache, a background refresh
     // costs ~80 ms and never re-runs the fan-out, which is what makes a timer
     // safe here where a clock-keyed URL was not.
-    fetch("/api/provider-pricing-matrix?metric="+metric+"&weight="+weight+"&b="+BUILD,{cache:background?"no-cache":"default"})
+    fetch("/api/provider-pricing-matrix?metric="+metric+"&weight="+weight+(openness?"&group=openness":"")+"&b="+BUILD,{cache:background?"no-cache":"default"})
       .then(r=>r.json())
       .then(d=>{ if(cancelled) return;
         if(!d.success){ health.fail(); if(!background) setState({phase:"error",data:null,error:d.error||"Unknown error"}); }
@@ -872,13 +896,29 @@ function ModelPricingHistoryBlock(){
       })
       .catch(e=>{ if(cancelled) return; health.fail(); if(!background) setState({phase:"error",data:null,error:e.message}); });
     return ()=>{cancelled=true;};
-  },[metric,weight,dataTick]);
+  },[metric,weight,group,dataTick]);
 
   const weighted=weight==="usage";
-  const title   ="Quarterly Model Pricing by Company";
-  const subtitle=weighted
+  const title   =openness?"Quarterly Model Pricing: Proprietary vs Open-weight":"Quarterly Model Pricing by Company";
+  const subtitle=openness
+    ?"Average list price per token by calendar quarter — API-only models against models whose weights anyone can download, across every lab tracked."
+    :weighted
     ?"Model API price per token by calendar quarter, weighted by the tokens each model actually served on OpenRouter — what was paid, not what was listed."
     :"Average model API price per token by calendar quarter, grouped by provider family, for historical comparison.";
+  // Which labs feed each side of the open/proprietary view, for its column
+  // headers' hover: "Qwen 42 · Mistral AI 25 · …".
+  const sideLabs=Object.fromEntries((state.data?.openness||[]).map(g=>[g.slug,g.labs.map(l=>l.label+" "+l.models).join(" · ")]));
+  // The open-weight discount column, Avg view only: a level beside levels.
+  // Under QoQ/YoY it would be a level among changes, so it steps out.
+  const showGap=openness&&view==="avg"&&state.data?.group==="openness";
+  // YoY needs the same quarter a year earlier, so every quarter within a year
+  // of the source's first one is blank by construction. Said under the table
+  // in the YoY view, so the dashes read as "not possible yet", not "missing".
+  const qs=state.data?.quarters||[];
+  const firstQ=qs.length?qs[qs.length-1].quarter:null;
+  const yearAgoQ=k=>{const m=/^(\d{4})-Q([1-4])$/.exec(k||"");return m?(+m[1]-1)+"-Q"+m[2]:null;};
+  const yoyStartQ=firstQ?[...qs].reverse().map(q=>q.quarter).find(k=>yearAgoQ(k)>=firstQ)||null:null;
+  const showYoYStart=view==="yoy"&&!!firstQ&&yoyStartQ!==firstQ;
   const unitHint=metric==="input"?"Input $/1M tokens":"Output $/1M tokens";
   const cellColor=(v)=>v===null||v===undefined?"#9ca3af":v>0?"#dc2626":v<0?"#059669":"#6b7280";
 
@@ -889,16 +929,34 @@ function ModelPricingHistoryBlock(){
         <span style={{width:7,height:7,borderRadius:"50%",background:"#0e7490",display:"inline-block"}}/>
         <span style={{fontSize:10,textTransform:"uppercase",letterSpacing:".09em",fontWeight:700,color:"#0e7490"}}>Model Pricing History</span>
       </div>
-      <div style={{marginBottom:10}}>
-        <div style={{fontSize:16,fontWeight:700,color:"#111827",lineHeight:1.3}}>{title}</div>
-        <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>{subtitle}</div>
+      <style>{SEG_CSS}</style>
+      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12,flexWrap:"wrap",marginBottom:10}}>
+        <div style={{minWidth:0,flex:"1 1 320px"}}>
+          <div style={{fontSize:16,fontWeight:700,color:"#111827",lineHeight:1.3}}>{title}</div>
+          <div style={{fontSize:11,color:"#9ca3af",marginTop:3}}>{subtitle}</div>
+        </div>
+        {/* How the columns are cut — the first question a reader asks of this
+           table, so it sits where the eye lands, beside the title, in the same
+           segmented style as the peer matrix's Quarterly / Monthly switch. */}
+        <div className="mph-seg" role="group" aria-label="Group columns by"
+          style={{display:"inline-flex",border:"0.5px solid #e5e7eb",borderRadius:6,overflow:"hidden",background:"#fff",flexShrink:0}}>
+          {[{id:"company",label:"By company"},{id:"openness",label:"Open vs proprietary"}].map(g=>(
+            <button key={g.id} onClick={()=>setGroup(g.id)} aria-pressed={group===g.id}
+              title={g.id==="company"
+                ?"One column per provider."
+                :"Proprietary (API-only) models against open-weight models (weights published to download), classed model by model — so Google's Gemma and OpenAI's gpt-oss count as open."}
+              style={{fontSize:11,padding:"4px 12px",border:"none",background:group===g.id?"#111827":"#fff",color:group===g.id?"#fff":"#6b7280",cursor:"pointer",fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>
+              {g.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Toggles */}
-      <div style={{display:"flex",gap:12,marginBottom:10,alignItems:"center",flexWrap:"wrap"}}>
+      <div className="mph-seg" style={{display:"flex",gap:12,marginBottom:10,alignItems:"center",flexWrap:"wrap"}}>
         <div style={{display:"flex",gap:5}}>
           {["input","output"].map(m=>(
-            <button key={m} onClick={()=>setMetric(m)}
+            <button key={m} onClick={()=>setMetric(m)} aria-pressed={metric===m}
               style={{fontSize:11,padding:"4px 11px",border:"0.5px solid "+(metric===m?"#111827":"#e5e7eb"),borderRadius:6,background:metric===m?"#111827":"#fff",color:metric===m?"#fff":"#6b7280",cursor:"pointer",fontFamily:"inherit",fontWeight:500,textTransform:"capitalize"}}>
               {m}
             </button>
@@ -906,25 +964,31 @@ function ModelPricingHistoryBlock(){
         </div>
         <div style={{display:"flex",gap:5}}>
           {[{id:"avg",label:"Avg $/1M"},{id:"qoq",label:"QoQ"},{id:"yoy",label:"YoY"}].map(v=>(
-            <button key={v.id} onClick={()=>setView(v.id)}
+            <button key={v.id} onClick={()=>setView(v.id)} aria-pressed={view===v.id}
               style={{fontSize:11,padding:"4px 11px",border:"0.5px solid "+(view===v.id?"#0e7490":"#e5e7eb"),borderRadius:6,background:view===v.id?"#0e7490":"#fff",color:view===v.id?"#fff":"#6b7280",cursor:"pointer",fontFamily:"inherit",fontWeight:500}}>
               {v.label}
             </button>
           ))}
         </div>
         {/* Weighting toggle — the question is "average of what?": every model
-           once, or every model in proportion to the traffic it carried. */}
-        <div style={{display:"inline-flex",border:"0.5px solid #e5e7eb",borderRadius:6,overflow:"hidden",background:"#fff"}}>
-          {[{id:"equal",label:"Model-day weight"},{id:"usage",label:"Usage weighted"}].map(w=>(
-            <button key={w.id} onClick={()=>setWeight(w.id)}
-              title={w.id==="equal"
-                ?"Every (model, day) price observation counts once — a model priced on more days of the quarter carries proportionally more of the mean."
-                :"Each model counts in proportion to the tokens it served on OpenRouter, charged at the price in force that week."}
-              style={{fontSize:11,padding:"4px 11px",border:"none",background:weight===w.id?"#111827":"#fff",color:weight===w.id?"#fff":"#6b7280",cursor:"pointer",fontFamily:"inherit",fontWeight:500}}>
-              {w.label}
-            </button>
-          ))}
-        </div>
+           once, or every model in proportion to the traffic it carried. The
+           open/proprietary view is list prices only, so it states that in the
+           toggle's place instead of offering a choice it cannot honour. */}
+        {openness?(
+          <span style={{fontSize:11,color:"#9ca3af"}} title="Usage weighting certifies each provider against its own OpenRouter total, which cannot be split into open and proprietary models — so this view uses list prices, every model-day counting once.">List prices · model-day weight</span>
+        ):(
+          <div style={{display:"inline-flex",border:"0.5px solid #e5e7eb",borderRadius:6,overflow:"hidden",background:"#fff"}}>
+            {[{id:"equal",label:"Model-day weight"},{id:"usage",label:"Usage weighted"}].map(w=>(
+              <button key={w.id} onClick={()=>setWeight(w.id)} aria-pressed={weight===w.id}
+                title={w.id==="equal"
+                  ?"Every (model, day) price observation counts once — a model priced on more days of the quarter carries proportionally more of the mean."
+                  :"Each model counts in proportion to the tokens it served on OpenRouter, charged at the price in force that week."}
+                style={{fontSize:11,padding:"4px 11px",border:"none",background:weight===w.id?"#111827":"#fff",color:weight===w.id?"#fff":"#6b7280",cursor:"pointer",fontFamily:"inherit",fontWeight:500}}>
+                {w.label}
+              </button>
+            ))}
+          </div>
+        )}
         {state.phase==="loading"&&<span><Spin size={10}/></span>}
       </div>
 
@@ -969,8 +1033,13 @@ function ModelPricingHistoryBlock(){
               <tr>
                 <th style={{...S.lbl,textAlign:"left",padding:"10px 12px",borderBottom:"1px solid #f3f4f6",background:"#fafafa",position:"sticky",left:0,zIndex:1}}>Quarter</th>
                 {state.data.providers.map(p=>(
-                  <th key={p.slug} style={{...S.lbl,textAlign:"right",padding:"10px 10px",borderBottom:"1px solid #f3f4f6",background:"#fafafa"}}>{p.label}</th>
+                  <th key={p.slug} title={sideLabs[p.slug]?p.label+" models by lab — "+sideLabs[p.slug]:undefined}
+                    style={{...S.lbl,textAlign:"right",padding:"10px 10px",borderBottom:"1px solid #f3f4f6",background:"#fafafa"}}>{p.label}</th>
                 ))}
+                {showGap&&(
+                  <th title="How far the open-weight average sits below the proprietary one in the same quarter."
+                    style={{...S.lbl,textAlign:"right",padding:"10px 12px",borderBottom:"1px solid #f3f4f6",background:"#fafafa"}}>Open-weight discount</th>
+                )}
               </tr>
             </thead>
             <tbody>
@@ -987,11 +1056,13 @@ function ModelPricingHistoryBlock(){
                     // explains it in full rather than leaving a bare dash to interpret.
                     const withheld=weighted&&c.avg===null&&!!c.gate;
                     // An estimate is offered only where the measured value was withheld AND the
-// server produced one. Two bases, and the sub-label says which: "provisional"
-// is real arithmetic on evidence too thin to publish as measured; "modelled"
-// had no usage at all and is inferred from this provider's own measured
-// weighted-to-list ratio (or peers', which is weaker still).
-                    const showEst=weighted&&c.avg===null&&c.estimateAvgLabel&&view==="avg";
+                    // server produced one. Two bases, and the sub-label says which: "provisional"
+                    // is real arithmetic on evidence too thin to publish as measured; "modelled"
+                    // had no usage at all and is inferred from this provider's own measured
+                    // weighted-to-list ratio (or peers', which is weaker still). hasEst holds in
+                    // every view, since QoQ/YoY are taken from the same estimated figure.
+                    const hasEst=weighted&&c.avg===null&&!!c.estimateAvgLabel;
+                    const showEst=hasEst&&view==="avg";
                     const GATE_SHORT={"series-unavailable":"weights unavailable","no-usage":"no paid OR volume","too-few-models":(c.weightedModelCount||1)+" model only","coverage-unknown":"coverage not measurable","low-coverage":"coverage "+(c.coverageLabel||"low"),"single-model-dominated":"1 model is "+(c.topWeightShareLabel||"most")};
                     // A change refused because the source changed what it reports
                     // between the two quarters is named, with the reason on hover.
@@ -1004,10 +1075,13 @@ function ModelPricingHistoryBlock(){
                     // Model-day growth is like-for-like: measured on the models priced in
                     // both quarters, so the lineup average would not reconcile with it and
                     // the sub-label says what it rests on instead. Where too few were priced
-                    // in both, the change is blank and the hover says why.
+                    // in both, the change is blank and the hover says why. Usage-weighted
+                    // growth is the change of the level shown, so the sub-label is that
+                    // level — the estimate where the measured value was withheld.
                     const matched=view==="qoq"?c.qoqMatchedModels:view==="yoy"?c.yoyMatchedModels:null;
                     const growthWhy=view==="qoq"?(c.qoqReason||c.qoqNote):view==="yoy"?(c.yoyReason||c.yoyNote):null;
-                    const growthSub=(g)=>matched==null?c.avgLabel
+                    const shownLevel=hasEst?c.estimateAvgLabel:c.avgLabel;
+                    const growthSub=(g)=>matched==null?shownLevel
                       :g!=null?matched+(matched===1?" model":" models")+" like-for-like"
                       :matched+" of "+(c.modelCount||0)+" in both qtrs";
                     if(view==="qoq"){ main=refusedWhy?measureChangedTag():(c.qoqLabel||"—"); color=cellColor(c.qoq); sub=growthSub(c.qoq); }
@@ -1035,14 +1109,14 @@ function ModelPricingHistoryBlock(){
                     // Grey marks an EMPTY cell, not an estimated one. An estimate is
                     // rendered in the measured colour at the owner's explicit
                     // direction, so it cannot be read as weaker data on a slide.
-                    if(withheld&&!showEst) color="#9ca3af";
+                    if(withheld&&!hasEst) color="#9ca3af";
                     const EST_WHY={
                       "measured-ratio":"this provider's own measured weighted-to-list ratio",
                       "provisional-ratio":"this provider's partial usage data, which was too thin to publish as measured",
                       "peer-ratio":"the median weighted-to-list ratio across providers that could be measured",
                     };
                     const tip=weighted
-                      ?(showEst
+                      ?(hasEst
                         ?"ESTIMATE, not measured — "+c.estimateAvgLabel+", from "+
                           (EST_WHY[c.estimateBasis]||"an inferred ratio")+
                           " ("+(c.estimateRatio!=null?"x"+c.estimateRatio.toFixed(2):"—")+
@@ -1063,10 +1137,27 @@ function ModelPricingHistoryBlock(){
                       <td key={c.slug} style={{padding:"10px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",textAlign:"right",fontWeight:600,color,whiteSpace:"nowrap"}}
                           title={refusedWhy||[growthWhy,tip,afterChangeTitle(afterChange?c.basis:null,c.basisExcludedObs)].filter(Boolean).join(" · ")}>
                         <div>{main}{view==="avg"&&afterChange&&main!=="—"&&afterChangeMark()}</div>
-                        <div style={{fontSize:9,color:withheld&&!showEst?"#d1d5db":"#9ca3af",fontWeight:400,marginTop:1}}>{sub}</div>
+                        <div style={{fontSize:9,color:withheld&&!hasEst?"#d1d5db":"#9ca3af",fontWeight:400,marginTop:1}}>{sub}</div>
                       </td>
                     );
                   })}
+                  {showGap&&(()=>{
+                    // Both sides are list-price lineup averages for the same
+                    // quarter, so their ratio is a like-for-like gap even where
+                    // each side's own lineup has changed.
+                    const cells=Object.fromEntries(q.cells.map(c=>[c.slug,c]));
+                    const prop=cells.proprietary?.avg, open=cells.open?.avg;
+                    const ok=prop>0&&open>0;
+                    const disc=ok?open/prop-1:null;
+                    const times=ok?prop/open:null;
+                    return(
+                      <td style={{padding:"10px 12px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",textAlign:"right",fontWeight:600,color:ok?"#0e7490":"#9ca3af",whiteSpace:"nowrap"}}
+                        title={ok?"Open-weight averages "+cells.open.avgLabel+" against "+cells.proprietary.avgLabel+" proprietary in "+q.quarter+": "+Math.abs(disc*100).toFixed(0)+"% "+(disc<0?"lower":"higher")+".":"Needs both averages for this quarter."}>
+                        <div>{ok?(disc<0?"−":"+")+Math.abs(disc*100).toFixed(0)+"%":"—"}</div>
+                        <div style={{fontSize:9,color:"#9ca3af",fontWeight:400,marginTop:1}}>{ok?(times>=1?times.toFixed(1)+"× cheaper":(1/times).toFixed(1)+"× dearer"):""}</div>
+                      </td>
+                    );
+                  })()}
                 </tr>
               ))}
             </tbody>
@@ -1086,9 +1177,11 @@ function ModelPricingHistoryBlock(){
          Every cell still carries its own coverage, model count and — for an
          estimate — its basis, on hover. */}
       <div style={{fontSize:10,color:"#6b7280",marginTop:8,lineHeight:1.5}}>
+        {showYoYStart&&<><b style={{color:"#374151"}}>{yoyStartQ?"YoY starts "+yoyStartQ:"No YoY yet"}</b>{" — the source's history begins "+(state.data?.earliestDateObserved||firstQ)+", so earlier quarters have no year-ago quarter"}<br/></>}
         <b style={{color:"#374151"}}>{unitHint}</b>
         {" · "}pricepertoken list prices{weighted?", weighted by OpenRouter token volume":""}
         {weighted&&<>{" · "}hover any cell for its coverage and basis</>}
+        {openness&&<>{" · "}<b style={{color:"#374151",fontWeight:600}}>open-weight</b> = weights published to download, any licence; <b style={{color:"#374151",fontWeight:600}}>proprietary</b> = API-only · classed per model, so Gemma and gpt-oss count as open · hover a column for its labs</>}
         {" · from "}{state.data?.earliestDateObserved||"2025-07-28"}
       </div>
     </div>
@@ -1376,6 +1469,18 @@ function ModelPricingMatrixTable(){
   // reports, or the two periods share no listing of the model (the change
   // would compare different listings). Same amber tag as measureChangedTag.
   const listingChangedTag=()=><span style={{color:"#b45309",fontSize:9,fontWeight:600,whiteSpace:"nowrap"}}>listing&nbsp;changed</span>;
+  // YoY needs the same period a year earlier, and the source's history only
+  // starts at earliestDateObserved: every period before yoyStart has no
+  // year-ago price by construction. Said once on the section row and on hover,
+  // so a run of dashes reads as "not yet possible" rather than "missing".
+  const historyStart=data.earliestDateObserved||null;
+  const historyStartPid=historyStart?(gran==="month"?historyStart.slice(0,7):historyStart.slice(0,4)+"-Q"+(Math.floor((+historyStart.slice(5,7)-1)/3)+1)):null;
+  const hasYearAgo=pid=>{const ya=finYearPriorPeriodId(pid);return!!historyStartPid&&!!ya&&ya>=historyStartPid;};
+  const yoyStart=periods.find(p=>hasYearAgo(p.id))||null;
+  const noYearAgoWhy=historyStart
+    ?"No year-ago price to compare with: the source's price history starts "+historyStart+"."
+    :null;
+  const isYoY=key=>key===G.yoy.input||key===G.yoy.output;
   const renderChangeRow=(rep,key)=>(
     <tr key={key+"-"+rep.key}>
       {renderModelLabel(rep)}
@@ -1383,7 +1488,7 @@ function ModelPricingMatrixTable(){
         const val=rep[key]?.[p.id];
         const measureWhy=val==null?rep.measureChanged?.[key]?.[p.id]:null;
         const listingWhy=val==null&&!measureWhy?rep.listingChanged?.[key]?.[p.id]:null;
-        const why=measureWhy||listingWhy;
+        const why=measureWhy||listingWhy||(val==null&&isYoY(key)&&!hasYearAgo(p.id)?noYearAgoWhy:null);
         return(<td key={p.id} style={{...tdDim,...bStyle(i)}} title={why||undefined}>{measureWhy?measureChangedTag():listingWhy?listingChangedTag():fmtChange(val)}</td>);
       })}
     </tr>
@@ -1425,13 +1530,18 @@ function ModelPricingMatrixTable(){
               {spacerRow("sp4")}
 
               {renderSectionRow("YoY Price Change (input)",
-                yoyAvailable?null:"No comparator yet — upstream history starts "+(data.earliestDateObserved||"mid-2025")+", so no full "+G.bucketWord+" has a year-ago pair. Populates automatically.")}
+                !yoyAvailable
+                  ?"No comparator yet — upstream history starts "+(data.earliestDateObserved||"mid-2025")+", so no full "+G.bucketWord+" has a year-ago pair. Populates automatically."
+                  :yoyStart&&yoyStart!==periods[0]
+                    ?"Starts "+periodIdToLabel(yoyStart.id,gran)+" — the source's history begins "+historyStart+", so earlier "+G.bucketWord+"s have no year-ago price."
+                    :null)}
               {reps.map(rep=>renderChangeRow(rep,G.yoy.input))}
 
               {spacerRow("sp5")}
 
               {renderSectionRow("YoY Price Change (output)",
-                yoyAvailable?null:"Same coverage limit as YoY input above.")}
+                !yoyAvailable?"Same coverage limit as YoY input above."
+                  :yoyStart&&yoyStart!==periods[0]?"Same start as YoY input above.":null)}
               {reps.map(rep=>renderChangeRow(rep,G.yoy.output))}
             </tbody>
           </table>
@@ -4075,7 +4185,7 @@ function PricingHistoryTab(){
     <>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <Pill text="Pricing History · quarterly by company + pricepertoken.com history" bg="#ecfeff" color="#0e7490"/>
+          <Pill text="Pricing History · quarterly by company or open vs proprietary + pricepertoken.com history" bg="#ecfeff" color="#0e7490"/>
         </div>
       </div>
 

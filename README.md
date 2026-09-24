@@ -49,29 +49,25 @@ price beside it is a median blended across every provider listing that model. Th
 column states its own caveat under the table. Both sides denominate one GPU, and
 the parser refuses to emit a figure if the source ever stops saying so.
 
-**Pricing History** — *Quarterly Model Pricing by Company*, the average `# AI Compute Pricing
-
-A standalone Cloudflare Pages dashboard for tracking the price of AI compute:
-what a million tokens costs across frontier models, and what a GPU-hour costs
-across the hardware those models run on.
-
-It began as a **direct copy** of the pricing sections of
-[`ceekay-munshot/google-dash`](https://github.com/ceekay-munshot/google-dash)
-(at commit `863c950`), lifted out so price tracking has its own home instead of
-sitting behind five other tabs. It reads the same data store, so the two
-dashboards show identical numbers. The UI, sorting, tooltips and copy are
-unchanged except where [Divergence from google-dash](#divergence-from-google-dash)
-says otherwise.
-
----
-
-/1M
+**Pricing History** — *Quarterly Model Pricing by Company*, the average $/1M
 tokens block with its *Model-day weight* vs *Usage weighted* toggle, its *Avg /
 QoQ / YoY* views and input/output split out; below it the reverse-proxied
 pricepertoken.com/pricing-history chart. The quarterly block used to sit on
 Model Pricing between the share signal and the live embed; the chart is new
 here, carried over from google-dash's AI Adoption tab where it has always
 lived. Neither was modified in the move.
+
+A *By company / Open vs proprietary* switch beside the block's title recuts the
+same matrix into two columns — **proprietary** (API-only) against
+**open-weight** (weights published to download, any licence) — plus the
+open-weight discount in the Avg view. Models are classed one by one, so Gemma
+and gpt-oss count as open while Gemini and GPT count as proprietary; the rules
+live in `functions/api/_model-openness.js` and agree with OpenRouter's
+Hugging Face links on every current model but five documented there. This view
+also reads Qwen, Moonshot (Kimi), Z.ai (GLM) and MiniMax, which have no company
+column, and is list prices only (model-day weight): a provider's OpenRouter
+total cannot be split into its open and proprietary models, so there is nothing
+to certify a usage-weighted figure against.
 
 ---
 
@@ -333,7 +329,12 @@ diagnosis, and every model-price read goes through that module.
   first listed on or after the date at Google or OpenAI (the GPT-5.6 family,
   Gemini 3.6 Flash) is placed on the new measure: nothing shows otherwise.
 - Each period averages ONE measure; QoQ / MoM / YoY across the change read
-  **measure changed**, and the pricing/share callouts cannot fire on them.
+  **measure changed**, and the pricing/share callouts cannot fire on them. The
+  one exception is the model-day provider matrix (and its open/proprietary
+  view): there the change is measured like-for-like on the models the change
+  touched in neither quarter, when those are at least half the lineup — OpenAI's
+  2026-Q3 QoQ rests on 50 untouched models; Google's, with 11 untouched of 29,
+  stays refused, and the hover says what was tried.
 - Prices after the change are shown exactly as reported (marked with a dagger), never
   rescaled. `original_*` fields are not a fix: they never move.
 
@@ -349,7 +350,10 @@ top-9 weekly chart, so usage-weighted coverage is low — OpenAI is measurable a
 only 2–16% of its own volume — and some cells are withheld with a `gate` reason.
 
 This is correct, intentional behaviour. The withheld cells and the coverage
-labels are the honest answer. The thresholds in `_usage-weights.js` are:
+labels are the honest answer. Where a ratio exists to scale from, a withheld
+cell shows an estimate in the Avg view, and QoQ / YoY are taken from that same
+figure so the three views of one series agree — the hover names which quarter
+is an estimate and gives the like-for-like list-price change beside it. The thresholds in `_usage-weights.js` are:
 
 ```js
 export const MIN_WEIGHTED_MODELS = 2;
