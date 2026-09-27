@@ -1066,7 +1066,7 @@ function ModelPricingHistoryBlock(){
       <div style={{fontSize:10,color:"#9ca3af",lineHeight:1.5,marginTop:6}}>
         {showYoYStart&&<><b style={{color:"#374151"}}>{yoyStartQ?"YoY starts "+yoyStartQ:"No YoY yet"}</b>{" — the source's history begins "+(state.data?.earliestDateObserved||firstQ)+", so earlier quarters have no year-ago quarter"}<br/></>}
         <b style={{color:"#374151"}}>{unitHint}</b>
-        {" · "}pricepertoken list prices{weighted?", weighted by OpenRouter token volume where it could be measured":""}
+        {" · "}pricepertoken list prices{weighted?", weighted by OpenRouter token volume":""}
         {weighted&&<>{" · "}hover any cell for its coverage and basis</>}
         {openness&&<>{" · "}<b style={{color:"#374151",fontWeight:600}}>open-weight</b> = weights published to download, any licence; <b style={{color:"#374151",fontWeight:600}}>proprietary</b> = API-only · classed per model, so Gemma and gpt-oss count as open · hover a column for its labs</>}
         {" · from "}{state.data?.earliestDateObserved||"2025-07-28"}
