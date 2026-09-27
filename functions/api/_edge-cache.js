@@ -56,9 +56,21 @@
  * stored matrix still carrying lineup-mix moves (Anthropic 2026-Q3 "-10.4%",
  * named the biggest price cut with no model repriced) must not be replayed.
  *
+ * v9: provider-pricing-matrix's usage-weighted QoQ/YoY are taken from the
+ * level each cell shows, estimated or measured, where they were blank beside
+ * every estimate; model-day QoQ/YoY across the 2026-07-10 change are measured
+ * on the models it did not touch; cells with nothing to compare carry a
+ * reason; and group=openness is new. A stored v8 matrix would show the old
+ * blanks for the rest of its TTL.
+ *
+ * v10: model-pricing growth across the source's 2026-07-10 change of
+ * reporting is linked at its exact factor instead of refused, in the provider
+ * matrix and the peer matrix alike; a stored v9 payload would keep showing
+ * "measure changed" where a figure now exists.
+ *
  * Routine data changes do NOT need a bump — the TTLs bound those.
  */
-const CACHE_SCHEMA = 'v8';
+const CACHE_SCHEMA = 'v10';
 
 /**
  * Build the cache key.

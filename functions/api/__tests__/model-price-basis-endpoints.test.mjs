@@ -22,11 +22,20 @@ async function call(handler, path) {
   try { return await (await handler({ request: new Request('https://x.test' + path), env: {}, waitUntil() {} })).json(); }
   finally { globalThis.fetch = realFetch; globalThis.caches = realCaches; }
 }
-test('provider matrix refuses QoQ across the change and keeps a genuine lone cut', async () => {
+test('provider matrix links QoQ across the change and keeps a genuine lone cut', async () => {
   const d = await call(providerMatrix, '/api/provider-pricing-matrix?metric=input');
   assert.deepEqual(d.measureBreaks.events.map(e => e.effectiveDate), ['2026-07-10']);
   const q3 = Object.fromEntries(d.quarters.find(q => q.quarter === '2026-Q3').cells.map(c => [c.slug, c]));
-  for (const slug of ['google', 'openai']) { assert.equal(q3[slug].qoq, null); assert.equal(q3[slug].qoqMeasureChanged, true); assert.match(q3[slug].qoqReason, /Not comparable/); }
+  // Six models halve on 2026-07-10 and one does not move: linked at the
+  // change's exact factor, none of them changed price. The old refusal read
+  // "measure changed"; the raw levels would have read about -45%.
+  for (const slug of ['google', 'openai']) {
+    assert.equal(q3[slug].qoq, 0);
+    assert.equal(q3[slug].qoqLinked, true);
+    assert.equal(q3[slug].qoqMeasureChanged, undefined);
+    assert.equal(q3[slug].qoqMatchedModels, 7);
+    assert.match(q3[slug].qoqNote, /The source changed how it reports prices on 2026-07-10, so the 6 models it moved are compared at the price they would have been reported at before it/);
+  }
   assert.ok(q3.anthropic.qoq < 0, 'the real cut is still reported');
   assert.equal(q3.anthropic.qoqMeasureChanged, undefined);
   // Like-for-like over the seven models priced in both quarters, each cut to
@@ -34,13 +43,15 @@ test('provider matrix refuses QoQ across the change and keeps a genuine lone cut
   // Q3 give 0.911x, -8.9%. The -0.09 this used to read came from dividing the
   // two levels AFTER rounding them to $0.001 per 1M.
   assert.equal(q3.deepseek.qoq, -0.089, 'an ordinary repricing the same day is reported as one');
-  for (const slug of ['google', 'openai']) assert.equal(q3[slug].qoqMatchedModels, undefined, 'a refused change matches no models');
 });
-test('peer matrix refuses Jun->Jul MoM on touched reps and keeps the lone cut', async () => {
+test('peer matrix links Jun->Jul MoM on touched reps across the change, and keeps the lone cut', async () => {
   const d = await call(peerMatrix, '/api/model-pricing-peer-matrix');
   const reps = Object.fromEntries(d.reps.map(r => [r.key, r]));
-  assert.equal(reps['google-fast'].momInput['2026-07'], undefined);
-  assert.match(reps['google-fast'].measureChanged.momInput['2026-07'], /Not comparable/);
+  // The source halved this model's figure on 2026-07-10 and nothing else
+  // moved: linked at the change's exact factor, July matches June.
+  assert.equal(reps['google-fast'].momInput['2026-07'], 0, 'the halving is linked, not reported as a cut');
+  assert.equal(reps['google-fast'].measureChanged?.momInput?.['2026-07'], undefined);
+  assert.match(reps['google-fast'].linkedChange.momInput['2026-07'], /cut the figure it reports to exactly half: compared at twice the reported price/);
   assert.equal(reps['google-fast'].momInput['2026-08'], 0, 'no second false cut from a blended July');
   const opus = d.reps.find(r => r.providerSlug === 'anthropic' && (r.matchedModels || []).includes('claude-opus-4'));
   assert.ok(opus.momInput['2026-08'] < 0, 'the genuine August cut is reported');

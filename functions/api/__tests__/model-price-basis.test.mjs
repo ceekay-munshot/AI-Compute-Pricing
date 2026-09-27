@@ -451,7 +451,8 @@ test('the caption names the vendors and counts, and says what is and is not comp
   assert.equal(d.headline, 'The source changed how it reports prices on 2026-07-10.');
   assert.match(d.detail, /6 Google and 6 OpenAI models fell to exactly half/);
   assert.match(d.detail, /not a price move/);
-  assert.match(d.detail, /measure changed/);
+  assert.match(d.detail, /compares like with like: each model the change moved is compared at twice its reported price/);
+  assert.match(d.detail, /first listed after the change cannot be linked, and reads measure changed/);
   assert.doesNotMatch(d.headline + d.detail, /pricing_|original_|basis|\/api\//);
   assert.equal(describeMeasureBreaks([[]]), null);
 });

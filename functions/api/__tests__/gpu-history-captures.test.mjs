@@ -73,13 +73,22 @@ function envFor(store) {
   };
 }
 
+// These tests are about the captured snapshots, which the quarter and
+// financial views now fall back to when getdeploying's weekly history cannot
+// be read. The history is made unreachable here so they exercise that path.
 async function call(qs, store) {
-  const res = await onRequestGet({
-    request: new Request('https://example.test/api/gpu-hardware-pricing-history' + qs),
-    env: envFor(store),
-  });
-  assert.equal(res.status, 200);
-  return res.json();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('unavailable', { status: 503 });
+  try {
+    const res = await onRequestGet({
+      request: new Request('https://example.test/api/gpu-hardware-pricing-history' + qs),
+      env: envFor(store),
+    });
+    assert.equal(res.status, 200);
+    return res.json();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 }
 
 /* ── What counts as a day ─────────────────────────────────────────────── */

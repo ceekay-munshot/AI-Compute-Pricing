@@ -673,10 +673,12 @@ function listingChangeReason(cur, prior, priorLabel) {
  * the same rule as the level; the comparison itself — and its refusal across
  * a change of measure — is growthSeries() from _model-price-basis.js.
  *
- * Returns { growth, measureChanged, listingChanged }, each { [pid]: ... }.
+ * Returns { growth, measureChanged, listingChanged, linked }, each
+ * { [pid]: ... }; `linked` holds the note for a change taken across the
+ * source's change of reporting (see linkedGrowth in _model-price-basis.js).
  */
 function likeForLikeGrowth(byPeriod, priorOf, { skip = null, events = [], ownNorms }) {
-  const growth = {}, measureChanged = {}, listingChanged = {};
+  const growth = {}, measureChanged = {}, listingChanged = {}, linked = {};
   for (const [pid, cur] of byPeriod) {
     if (pid === skip) continue;
     const ppid = priorOf(pid);
@@ -693,10 +695,13 @@ function likeForLikeGrowth(byPeriod, priorOf, { skip = null, events = [], ownNor
       [ppid, mergeTallies(shared.map(m => prior.get(m)))],
     ]));
     const one = growthSeries(pair.levels, p => (p === pid ? ppid : null), { events });
-    if (pid in one.growth) growth[pid] = one.growth[pid];
-    else if (pid in one.measureChanged) measureChanged[pid] = one.measureChanged[pid];
+    if (pid in one.growth) {
+      growth[pid] = one.growth[pid];
+      // Across the source's change of reporting, linked at its exact factor.
+      if (pid in one.linked) linked[pid] = one.linked[pid];
+    } else if (pid in one.measureChanged) measureChanged[pid] = one.measureChanged[pid];
   }
-  return { growth, measureChanged, listingChanged };
+  return { growth, measureChanged, listingChanged, linked };
 }
 
 /** Whether any of a rep's change `fields` had a prior period — computed or refused. */
@@ -812,6 +817,12 @@ function periodSeries(t, todayQ, todayM, books, ownNorms) {
       yoyInput: yoyIn.measureChanged, yoyOutput: yoyOut.measureChanged,
       yoyInputMonthly: yoyMIn.measureChanged, yoyOutputMonthly: yoyMOut.measureChanged,
     }),
+    linkedChange: sparse({
+      qoqInput: qoqIn.linked, qoqOutput: qoqOut.linked,
+      momInput: momIn.linked, momOutput: momOut.linked,
+      yoyInput: yoyIn.linked, yoyOutput: yoyOut.linked,
+      yoyInputMonthly: yoyMIn.linked, yoyOutputMonthly: yoyMOut.linked,
+    }),
     listingChanged: sparse({
       qoqInput: qoqIn.listingChanged, qoqOutput: qoqOut.listingChanged,
       momInput: momIn.listingChanged, momOutput: momOut.listingChanged,
@@ -866,11 +877,13 @@ function buildPerModelHistory(providerData, todayQ, todayM, books) {
     const outP = readPrice(row, 'output', { allowZero: true });
     if (inP !== null) {
       const b = books.input.basisOf(providerData.slug, row.model, day);
-      addToTally(qIn, b, inP); addToTally(mIn, b, inP);
+      const l = books.input.linkOf(providerData.slug, row.model, day);
+      addToTally(qIn, b, inP, undefined, l); addToTally(mIn, b, inP, undefined, l);
     }
     if (outP !== null) {
       const b = books.output.basisOf(providerData.slug, row.model, day);
-      addToTally(qOut, b, outP); addToTally(mOut, b, outP);
+      const l = books.output.linkOf(providerData.slug, row.model, day);
+      addToTally(qOut, b, outP, undefined, l); addToTally(mOut, b, outP, undefined, l);
     }
   }
 
@@ -1270,11 +1283,13 @@ async function buildPeerMatrix(request, env) {
       const outP = readPrice(row, 'output');
       if (inP !== null) {
         const b = books.input.basisOf(rep.providerSlug, row.model, day);
-        addToTally(tallyFor(qIn, row.model), b, inP, row.model); addToTally(tallyFor(mIn, row.model), b, inP, row.model);
+        const l = books.input.linkOf(rep.providerSlug, row.model, day);
+        addToTally(tallyFor(qIn, row.model), b, inP, row.model, l); addToTally(tallyFor(mIn, row.model), b, inP, row.model, l);
       }
       if (outP !== null) {
         const b = books.output.basisOf(rep.providerSlug, row.model, day);
-        addToTally(tallyFor(qOut, row.model), b, outP, row.model); addToTally(tallyFor(mOut, row.model), b, outP, row.model);
+        const l = books.output.linkOf(rep.providerSlug, row.model, day);
+        addToTally(tallyFor(qOut, row.model), b, outP, row.model, l); addToTally(tallyFor(mOut, row.model), b, outP, row.model, l);
       }
       if (row.model) matchedModelSet.add(row.model);
     }
@@ -1326,6 +1341,9 @@ async function buildPeerMatrix(request, env) {
       basisExcludedObs: series.basisExcludedObs,
       measureChanged: series.measureChanged,
       listingChanged: series.listingChanged,
+      // A change taken across the source's change of reporting, linked at its
+      // exact factor: the note for the cell's tooltip.
+      linkedChange: series.linkedChange,
       // Listings of this model the row may be priced from, and those that
       // matched its name but that the source prices as a separate SKU.
       matchedModels: Array.from(matchedModelSet).sort(),
@@ -1381,8 +1399,8 @@ async function buildPeerMatrix(request, env) {
       const acc = models.get(row.model) || { in: createTally(), out: createTally() };
       const day = rowDay(row);
       const inP = readPrice(row, 'input'), outP = readPrice(row, 'output');
-      if (inP  !== null) addToTally(acc.in,  books.input.basisOf(provider.slug, row.model, day),  inP,  row.model);
-      if (outP !== null) addToTally(acc.out, books.output.basisOf(provider.slug, row.model, day), outP, row.model);
+      if (inP  !== null) addToTally(acc.in,  books.input.basisOf(provider.slug, row.model, day),  inP,  row.model, books.input.linkOf(provider.slug, row.model, day));
+      if (outP !== null) addToTally(acc.out, books.output.basisOf(provider.slug, row.model, day), outP, row.model, books.output.linkOf(provider.slug, row.model, day));
       models.set(row.model, acc);
     }
 
@@ -1429,6 +1447,8 @@ async function buildPeerMatrix(request, env) {
       basisIn: rIn.basis, basisOut: rOut.basis,
       refusedChgIn: chgIn.measureChanged, refusedChgOut: chgOut.measureChanged,
       refusedYoyIn: yoyIn.measureChanged, refusedYoyOut: yoyOut.measureChanged,
+      linkedChgIn: chgIn.linked, linkedChgOut: chgOut.linked,
+      linkedYoyIn: yoyIn.linked, linkedYoyOut: yoyOut.linked,
     };
   }
 
@@ -1497,6 +1517,12 @@ async function buildPeerMatrix(request, env) {
         yoyInput: q.refusedYoyIn, yoyOutput: q.refusedYoyOut,
         momInput: m.refusedChgIn, momOutput: m.refusedChgOut,
         yoyInputMonthly: m.refusedYoyIn, yoyOutputMonthly: m.refusedYoyOut,
+      }),
+      linkedChange: sparse({
+        chgInput: q.linkedChgIn, chgOutput: q.linkedChgOut,
+        yoyInput: q.linkedYoyIn, yoyOutput: q.linkedYoyOut,
+        momInput: m.linkedChgIn, momOutput: m.linkedChgOut,
+        yoyInputMonthly: m.linkedYoyIn, yoyOutputMonthly: m.linkedYoyOut,
       }),
     };
   });

@@ -204,7 +204,7 @@ test('YoY is like-for-like too, and refused on a lineup that mostly turned over'
 
 /* ── A change of measure is still refused, and nothing re-enters ──────── */
 
-test('a model the change of measure moved cannot re-enter through the matched set', async () => {
+test('across the change of measure every moved model is linked at its exact factor, a returned one included', async () => {
   const Q4_END = '2026-10-31';
   const touched = [['g-1', 1.25e-6], ['g-2', 3e-7], ['g-3', 1e-7], ['g-4', 2e-6], ['g-5', 5e-7]];
   const d = await matrix({
@@ -219,12 +219,13 @@ test('a model the change of measure moved cannot re-enter through the matched se
   });
   assert.deepEqual(d.measureBreaks.events.map(e => e.effectiveDate), ['2026-07-10']);
   const q3 = cellsOf(d, '2026-Q3').google, q4 = cellsOf(d, '2026-Q4').google;
-  // Q3 against Q2 is refused before any model is matched.
-  assert.equal(q3.qoq, null);
-  assert.equal(q3.qoqMeasureChanged, true);
-  assert.match(q3.qoqReason, /^Not comparable/);
-  assert.equal(q3.qoqMatchedModels, undefined);
-  assert.equal(q3.qoqNote, undefined);
+  // Q3 against Q2: each moved model enters at twice its reported Q3 price —
+  // exactly its Q2 figure — so nothing moved. g-ret's Q3 level rests on its
+  // halved days, linked the same way. The raw levels would read a cut.
+  assert.equal(q3.qoq, 0);
+  assert.equal(q3.qoqLinked, true);
+  assert.equal(q3.qoqMeasureChanged, undefined);
+  assert.equal(q3.qoqMatchedModels, 7);
   // Q4 against Q3, both on the new measure. g-ret's Q4 figures are all on the
   // old measure, so it is in neither Q4's level nor the matched set; were it
   // matched on its raw figures, Q3's blend of $0.25 and $0.50 against Q4's
@@ -266,7 +267,7 @@ test('the read-through no longer names a lineup change as the biggest price cut'
       ...hist('ds-a', [[S, Q2_END, 1e-6], [Q3_START, E, 9e-7]]),
       ...hist('ds-b', [[S, Q2_END, 2e-6], [Q3_START, E, 1.8e-6]]),
     ],
-    // The change of measure: refused, and still refused here.
+    // The change of measure: linked at its exact factor, so no move.
     google: [
       ...[['g-1', 1.25e-6], ['g-2', 3e-7], ['g-3', 1e-7], ['g-4', 2e-6], ['g-5', 5e-7]]
         .flatMap(([m, p]) => hist(m, [[S, '2026-07-09', p], ['2026-07-10', E, p / 2]])),
@@ -279,14 +280,15 @@ test('the read-through no longer names a lineup change as the biggest price cut'
   assert.equal(rows.anthropic.priceQoq, 0, "the matrix's like-for-like figure, not the lineup average's");
   assert.equal(rows.anthropic.priceReg, 'hold');
   assert.equal(rows.deepseek.priceQoq, -0.1);
-  assert.equal(rows.google.priceMeasureChanged, true);
-  assert.equal(rows.google.priceQoq, null);
+  assert.equal(rows.google.priceMeasureChanged, false);
+  assert.equal(rows.google.priceQoq, 0, 'the halving is linked, not a cut');
+  assert.equal(rows.google.priceReg, 'hold');
 
   const cut = d.callouts.find(c => c.kind === 'biggest_price_cut');
   assert.equal(cut?.slug, 'deepseek', 'the genuine cut is the one called out');
   assert.ok(cut.detail.startsWith('-10.0%'));
   for (const c of d.callouts.filter(c => c.kind !== 'strongest_share_gain')) {
     assert.notEqual(c.slug, 'anthropic', 'price callout fired on a lineup change: ' + c.kind);
-    assert.notEqual(c.slug, 'google', 'price callout fired on a refused change: ' + c.kind);
+    assert.ok(!(c.slug === 'google' && c.kind === 'biggest_price_cut'), 'the linked halving must not read as a cut');
   }
 });
