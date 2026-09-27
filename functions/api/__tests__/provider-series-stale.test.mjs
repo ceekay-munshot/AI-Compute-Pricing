@@ -75,7 +75,7 @@ const modelWeeks = (starts) => ({
  * @param capturedBack how many weeks behind the captured provider series is
  * @param liveWorks    whether the live market-share dataset answers
  */
-function mockFetch({ capturedBack, liveWorks }) {
+function mockFetch({ capturedBack, liveWorks, modelBack = 1 }) {
   // validateMarketShare refuses a series under 8 weekly points as too short
   // to certify coverage against, so the live fixture must clear that bar.
   const recent = Array.from({ length: 10 }, (_, i) => weekStartBack(10 - i));
@@ -100,7 +100,10 @@ function mockFetch({ capturedBack, liveWorks }) {
         return new Response(JSON.stringify(
           providerWeeks([weekStartBack(capturedBack + 1), weekStartBack(capturedBack)])), { status: 200 });
       }
-      return new Response(JSON.stringify(modelWeeks(recent)), { status: 200 });
+      // The MODEL weekly series, as stale as the case under test. Its own
+      // fallback is the bundled May seed, served silently when KV is empty.
+      const modelStarts = Array.from({ length: 10 }, (_, i) => weekStartBack(modelBack + 9 - i));
+      return new Response(JSON.stringify(modelWeeks(modelStarts)), { status: 200 });
     }
     if (u.pathname === '/api/openrouter-model-usage') {
       return new Response(JSON.stringify({ success: true, weeksStored: 0, weeks: [] }), { status: 200 });
@@ -177,4 +180,41 @@ test('the two series refusals are told apart, and the reason is accurate', () =>
   assert.match(why, /stale|months old/i);
   assert.doesNotMatch(why, /could not be loaded/i,
     'it loaded — saying otherwise would be the same class of wrong label this fixes');
+});
+
+/* ── the model series is the OTHER half of the same division ──────────────
+   The provider side got a staleness gate first. The model side is what
+   supplies the weights themselves, and its fallback is the bundled
+   2026-05-20 seed — served as a normal 200 when KV is empty. Weighting this
+   quarter's prices by May's usage and publishing it as measured is the same
+   fault, one input over. */
+
+test('a months-old model series withholds the weighted view, with its own reason', async () => {
+  const d = await run({ capturedBack: 1, liveWorks: true, modelBack: 20 });
+  assert.equal(d.weighting.modelSeriesStale, true);
+  assert.ok(d.weighting.modelSeriesCapturedWeeksBehind >= 20,
+    'weeks-behind is reported, got ' + d.weighting.modelSeriesCapturedWeeksBehind);
+  const cells = anyCell(d);
+  assert.ok(cells.length > 0, 'the grid still renders');
+  for (const c of cells) {
+    assert.equal(c.avg, null, 'no weighted level off stale weights');
+    assert.equal(c.gate, 'model-series-stale');
+  }
+});
+
+test('a current model series is NOT gated', async () => {
+  // This is the case that catches wiring the staleness check to the wrong
+  // shape: overlayRichModelWeeks returns { series: { weeks } }, and wrapping
+  // that object again makes every request look infinitely stale. The provider
+  // assertions alone cannot see it, because the provider branch is checked first.
+  const d = await run({ capturedBack: 1, liveWorks: true, modelBack: 1 });
+  assert.equal(d.weighting.modelSeriesStale, false);
+  assert.equal(d.weighting.modelSeriesCapturedWeeksBehind, 1);
+  assert.ok(anyCell(d).every(c => c.gate !== 'model-series-stale'));
+});
+
+test('the model-side reason says stale, not unloadable', () => {
+  const why = gateReason('model-series-stale');
+  assert.match(why, /stale|months behind/i);
+  assert.doesNotMatch(why, /could not be loaded/i);
 });

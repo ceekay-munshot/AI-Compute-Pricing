@@ -466,6 +466,11 @@ export function gateReason(gate, coverage, models) {
     case 'series-unavailable':
       return 'The OpenRouter weekly token series could not be loaded, so no weights ' +
         'could be built. This says nothing about actual usage.';
+    case 'model-series-stale':
+      return 'The OpenRouter weekly per-model token series is months behind, so ' +
+        'the weights would come from stale usage rather than this quarter\'s. ' +
+        'Weighting current prices by old volumes would misreport what was paid. ' +
+        'This says nothing about actual usage.';
     case 'provider-series-stale':
       return 'The live OpenRouter market-share dataset could not be read, and the ' +
         'captured provider totals behind it are months old — too stale to serve as ' +
