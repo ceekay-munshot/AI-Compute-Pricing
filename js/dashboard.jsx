@@ -4,50 +4,11 @@ import { buildXlsx, downloadXlsx } from "./xlsx-export.js";
 import { buildGPUPricingWorkbook, gpuWorkbookFilename } from "./gpu-xlsx-report.js";
 import { resilienceSignal, LOW_PRICED_COVERAGE } from "./gpu-resilience.js";
 
-/* ─── Live data fetched by me right now (Apr 11 2026) ───────
-   Sources:
-   OR:    raw.githubusercontent.com/jampongsathorn/openrouter-rankings (Apr 1 2026)
-   Radar: websearchapi.ai citing Cloudflare Radar (Mar 4–Apr 3 2026)
-   Bots:  Cloudflare Radar AI Insights
-   Filing: SEC 8-K exhibit, filed Feb 4 2026
-──────────────────────────────────────────────────────────── */
-const LIVE = {
-  fetchedAt: "Apr 11 2026 · 17:45 UTC",
-  or: [
-    {rank:1,model:"grok-4.1-fast",           provider:"x-ai",       tokens:"53.8M",tokRaw:53810188,wow:"-24%",wowN:-24,isGemini:false},
-    {rank:2,model:"gemini-2.5-flash-lite",    provider:"google",     tokens:"33.7M",tokRaw:33666645,wow:"-64%",wowN:-64,isGemini:true},
-    {rank:3,model:"gemini-2.5-flash",         provider:"google",     tokens:"29.4M",tokRaw:29408225,wow:"-67%",wowN:-67,isGemini:true},
-    {rank:4,model:"gpt-oss-120b",             provider:"openai",     tokens:"29.2M",tokRaw:29203585,wow:"-65%",wowN:-65,isGemini:false},
-    {rank:5,model:"gemini-3-flash-preview",   provider:"google",     tokens:"22.3M",tokRaw:22263082,wow:"-64%",wowN:-64,isGemini:true},
-    {rank:6,model:"deepseek-v3.2",            provider:"deepseek",   tokens:"20.8M",tokRaw:20769070,wow:"-66%",wowN:-66,isGemini:false},
-    {rank:7,model:"gpt-4o-mini",              provider:"openai",     tokens:"12.3M",tokRaw:12285405,wow:"-66%",wowN:-66,isGemini:false},
-    {rank:8,model:"llama-3.1-8b-instruct",    provider:"meta-llama", tokens:"9.29M",tokRaw:9288457, wow:"-68%",wowN:-68,isGemini:false},
-    {rank:9,model:"gemini-3.1-flash-lite-preview",provider:"google", tokens:"8.14M",tokRaw:8143622, wow:"-64%",wowN:-64,isGemini:true},
-  ],
-  bots: [
-    {name:"Googlebot",          pct:31.6,color:"#10b981"},
-    {name:"Meta-ExternalAgent", pct:16.7,color:"#8b5cf6"},
-    {name:"GPTBot",             pct:12.0,color:"#3b82f6"},
-    {name:"ClaudeBot",          pct:11.7,color:"#f59e0b"},
-    {name:"Bingbot",            pct:8.2, color:"#06b6d4"},
-    {name:"Applebot",           pct:5.8, color:"#ec4899"},
-    {name:"Others",             pct:14.0,color:"#9ca3af"},
-  ],
-  trends: [
-    {term:"ChatGPT",   score:100,color:"#3b82f6"},
-    {term:"Gemini AI", score:68, color:"#10b981"},
-    {term:"Copilot",   score:42, color:"#8b5cf6"},
-    {term:"Claude AI", score:28, color:"#f59e0b"},
-    {term:"Perplexity",score:19, color:"#ef4444"},
-  ],
-  filing: {
-    period:"Q4 2025",
-    searchRevenue:"$63.1B", searchRevenueGrowth:"+17%",
-    paidClicksGrowth:"+13%", cpcGrowth:"-1%",
-    totalRevenue:"$113.8B", totalRevenueGrowth:"+18%",
-    source:"https://www.sec.gov/Archives/edgar/data/1652044/000165204426000012/googexhibit991q42025.htm",
-  },
-};
+/* The hard-coded April-2026 `LIVE` fixture that used to sit here was removed.
+   It held invented-looking OpenRouter, Radar, bots and SEC-filing figures for
+   tabs this dashboard does not have, reached nothing on screen, and was exactly
+   the sort of leftover that gets wired back up by mistake. Every figure here is
+   fetched at runtime. */
 
 /* ─── colours ───────────────────────────────────────────── */
 const PROV_C={google:"#10b981",openai:"#3b82f6","x-ai":"#8b5cf6",anthropic:"#f59e0b",meta:"#ef4444","meta-llama":"#ef4444",deepseek:"#06b6d4",other:"#9ca3af"};
@@ -142,67 +103,11 @@ function usePanel(seedData,fetcher){
   return{data,busy,ts,live,refresh};
 }
 
-/* ─── live fetchers — call deployed /api/* endpoints ────── */
-const TIMEOUT=25000;
-function timedFetch(url,opts={}){
-  const c=new AbortController();
-  const t=setTimeout(()=>c.abort(),TIMEOUT);
-  return fetch(url,{...opts,signal:c.signal}).finally(()=>clearTimeout(t));
-}
-
-async function fetchOR(){
-  const r=await timedFetch("/api/openrouter?view=week&top=30");
-  const d=await r.json();
-  if(!d.success||!d.models?.length)throw new Error(d.error||"empty");
-  const seen={};
-  const parseTok=(lbl,raw)=>{
-    if(raw&&raw>0)return raw;
-    const m=(lbl||"").match(/([\d.]+)\s*([BT])/i);
-    if(!m)return 0;
-    const v=parseFloat(m[1]),u=m[2].toUpperCase();
-    return u==="T"?v*1e12:v*1e9;
-  };
-  return d.models.map(m=>{
-    const name=(m.model||"").replace(/\[([^\]]+)\]\([^)]*\)/g,"$1").replace(/^by\s+/i,"").trim();
-    return {
-      rank:m.rank,model:name,provider:m.provider,
-      tokens:m.tokensLabel,tokRaw:parseTok(m.tokensLabel,m.tokens),
-      wow:m.wowLabel||"—",wowN:m.wowPct,isGemini:m.isGemini||/gemini/i.test(name),
-    };
-  }).filter(m=>{const k=m.rank+"-"+m.model;if(seen[k])return false;seen[k]=true;return true});
-}
-
-async function fetchRadar(){
-  const r=await timedFetch("/api/radar/ai/bots/summary/user_agent?dateRange=28d");
-  const d=await r.json();
-  const raw=d?.result?.summary_0||{};
-  const BOT_COLORS=["#10b981","#8b5cf6","#3b82f6","#f59e0b","#06b6d4","#ec4899","#9ca3af","#ef4444"];
-  const entries=Object.entries(raw)
-    .filter(([k])=>k!=="timestamps")
-    .map(([name,val])=>({name,pct:Math.round(parseFloat(val)*10)/10}))
-    .filter(b=>b.pct>0).sort((a,b)=>b.pct-a.pct).slice(0,8)
-    .map((b,i)=>({...b,color:BOT_COLORS[i%BOT_COLORS.length]}));
-  if(!entries.length)throw new Error("empty");
-  return entries;
-}
-
-async function fetchTrends(){
-  const r=await timedFetch("/api/trends?window=12m");
-  const d=await r.json();
-  if(!d.success)throw new Error(d.error||"failed");
-  const TC={"Gemini AI":"#10b981","ChatGPT":"#3b82f6","Claude AI":"#f59e0b","Perplexity":"#ef4444","Copilot":"#8b5cf6"};
-  return (d.summary||[])
-    .filter(s=>s.latest!==null)
-    .map(s=>({term:s.term,score:Math.round(s.latest||0),color:TC[s.term]||"#9ca3af"}))
-    .sort((a,b)=>b.score-a.score);
-}
-
-async function fetchFiling(){
-  const r=await timedFetch("/api/google-filings");
-  const d=await r.json();
-  if(!d.success)throw new Error(d.error||"failed");
-  return d;
-}
+/* The four /api fetchers that used to live here — fetchOR, fetchRadar,
+   fetchTrends, fetchFiling, with their timedFetch/TIMEOUT helper — were
+   removed. Nothing called them, and three pointed at endpoints this repo does
+   not deploy (/api/radar, /api/trends, /api/google-filings). They are still in
+   google-dash, which has the tabs that use them. */
 
 /* ═══════════════════════════════════════════════════════
    FILING ANCHOR ROW
@@ -234,11 +139,13 @@ function ShareBasisNote({ basis, days }){
 
 function PricingSharePartialView({ header, quarter, basis }){
   const rows=(quarter.rows||[]).filter(r=>typeof r.priceQoq==="number"&&typeof r.shareAvg==="number");
-  // Providers whose price change was refused because the source changed what
-  // it reports between the quarters. Their share is real, so they stay in the
-  // table; they have no price change, so they stay off the chart — and are
-  // named, instead of vanishing.
-  const refusedRows=(quarter.rows||[]).filter(r=>r.priceMeasureChanged&&typeof r.shareAvg==="number");
+  // Providers whose price change the matrix refused, for EITHER reason: the
+  // source changed what it reports, or too few models were priced in both
+  // quarters to compare like for like. Their share is real, so they stay in
+  // the table; they have no price change, so they stay off the chart — and are
+  // named, instead of vanishing. Filtering on priceMeasureChanged alone used
+  // to drop the too-few-matched case out of all three.
+  const refusedRows=(quarter.rows||[]).filter(r=>r.priceRefused&&typeof r.shareAvg==="number");
   const W=520,H=360,pL=44,pR=18,pT=22,pB=32;
   const xMax=Math.max(5,...rows.map(r=>Math.abs(r.priceQoq*100)))*1.15;
   const yMax=Math.max(5,...rows.map(r=>r.shareAvg))*1.12;
@@ -377,7 +284,7 @@ function PricingSharePartialView({ header, quarter, basis }){
                   </td>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",color:"#111827"}}>{r.avgLabel}</td>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",fontWeight:600,color:r.priceQoq>0?"#dc2626":r.priceQoq<0?"#059669":"#6b7280"}}
-                      title={r.priceMeasureChanged?(r.priceQoqReason||undefined):undefined}>{r.priceMeasureChanged?measureChangedTag():r.priceQoqLabel}</td>
+                      title={r.priceRefused?(r.priceQoqReason||undefined):undefined}>{r.priceRefused?refusalTag(r.priceRefusedKind):r.priceQoqLabel}</td>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",color:"#111827"}}>{r.shareAvgLabel}</td>
                 </tr>
               ))}
@@ -476,7 +383,7 @@ function PricingShareSignalBlock(){
      view — Price QoQ vs current Share % — so the block stays useful
      instead of showing a dead empty state until Q3 snapshots accumulate. */
   if(!latest||!latest.rows||!latest.rows.length){
-    const partialQuarter=(d.quarters||[]).find(q=>(q.rows||[]).some(r=>typeof r.shareAvg==="number"&&(typeof r.priceQoq==="number"||r.priceMeasureChanged)));
+    const partialQuarter=(d.quarters||[]).find(q=>(q.rows||[]).some(r=>typeof r.shareAvg==="number"&&(typeof r.priceQoq==="number"||r.priceRefused)));
     if(!partialQuarter){
       return(
         <div style={{marginBottom:16}}>
@@ -498,12 +405,16 @@ function PricingShareSignalBlock(){
      renders tall enough to visually balance the signal table alongside it. */
   const W=520,H=360,pL=40,pR=18,pT=22,pB=32;
   const rows=latest.rows.filter(r=>typeof r.priceQoq==="number"&&typeof r.shareQoqPP==="number");
-  // Providers whose price change was refused because the source changed what
-  // it reports between the quarters. They stay in the table — their share move
-  // is real — but have no x position, so they are kept off the chart.
-  const refusedRows=latest.rows.filter(r=>r.priceMeasureChanged&&typeof r.shareQoqPP==="number");
+  // Providers whose price change the matrix refused, for EITHER reason (see
+  // PricingSharePartialView). They stay in the table — their share move is
+  // real — but have no x position, so they are kept off the chart.
+  const refusedRows=latest.rows.filter(r=>r.priceRefused&&typeof r.shareQoqPP==="number");
+  const refusedMeasure=refusedRows.filter(r=>r.priceRefusedKind!=="too_few_matched");
+  const refusedTooFew=refusedRows.filter(r=>r.priceRefusedKind==="too_few_matched");
   const tableRows=[...rows,...refusedRows];
   const refusedNames=joinNames(refusedRows.map(r=>r.label));
+  const refusedMeasureNames=joinNames(refusedMeasure.map(r=>r.label));
+  const refusedTooFewNames=joinNames(refusedTooFew.map(r=>r.label));
   // Neither list reaches the chart or the table, so each is named instead of
   // vanishing: providers with a share now but none in the prior quarter (no
   // share change to plot), and providers with a share then but none now.
@@ -565,7 +476,9 @@ function PricingShareSignalBlock(){
       {refusedRows.length>0&&(
         <div style={{fontSize:11,color:"#92400e",marginTop:-4,marginBottom:8,lineHeight:1.5}}
              title={d.measureBreaks?.summary?d.measureBreaks.summary.headline+" "+d.measureBreaks.summary.detail:undefined}>
-          {refusedNames} {refusedRows.length===1?"is":"are"} left off the chart: the source changed how it reports {refusedRows.length===1?"its":"their"} prices between these quarters, so {refusedRows.length===1?"its":"their"} price change is not computed.
+          {refusedMeasure.length>0&&<>{refusedMeasureNames} {refusedMeasure.length===1?"is":"are"} left off the chart: the source changed how it reports {refusedMeasure.length===1?"its":"their"} prices between these quarters, so {refusedMeasure.length===1?"its":"their"} price change is not computed.</>}
+          {refusedMeasure.length>0&&refusedTooFew.length>0&&" "}
+          {refusedTooFew.length>0&&<>{refusedTooFewNames} {refusedTooFew.length===1?"is":"are"} left off the chart: too few of {refusedTooFew.length===1?"its":"their"} models were priced in both quarters to compare like for like, so {refusedTooFew.length===1?"its":"their"} price change is not computed.</>}
         </div>
       )}
       {(noPriorShare.length>0||noShareNow.length>0)&&(
@@ -660,7 +573,7 @@ function PricingShareSignalBlock(){
                   </td>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",color:"#111827"}}>{r.avgLabel}</td>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",fontWeight:600,color:r.priceQoq>0?"#dc2626":r.priceQoq<0?"#059669":"#6b7280"}}
-                      title={r.priceMeasureChanged?(r.priceQoqReason||undefined):undefined}>{r.priceMeasureChanged?measureChangedTag():r.priceQoqLabel}</td>
+                      title={r.priceRefused?(r.priceQoqReason||undefined):undefined}>{r.priceRefused?refusalTag(r.priceRefusedKind):r.priceQoqLabel}</td>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",fontWeight:600,color:r.shareQoqPP>0?"#059669":r.shareQoqPP<0?"#dc2626":"#6b7280"}}>{r.shareQoqLabel}</td>
                   <td style={{padding:"8px 10px",borderBottom:"1px solid #f9fafb",fontSize:11,color:"#374151",lineHeight:1.35}}>
                     <div style={{fontWeight:600,color:"#111827"}}>{r.regimeLabel}</div>
@@ -883,7 +796,11 @@ function ModelPricingHistoryBlock(){
   const yearAgoQ=k=>{const m=/^(\d{4})-Q([1-4])$/.exec(k||"");return m?(+m[1]-1)+"-Q"+m[2]:null;};
   const yoyStartQ=firstQ?[...qs].reverse().map(q=>q.quarter).find(k=>yearAgoQ(k)>=firstQ)||null:null;
   const showYoYStart=view==="yoy"&&!!firstQ&&yoyStartQ!==firstQ;
-  const unitHint=metric==="input"?"Input $/1M tokens":"Output $/1M tokens";
+  // Follows BOTH controls: under QoQ/YoY every cell is a percentage, so naming
+  // a dollar unit there told the reader the wrong unit for what is on screen.
+  const unitHint=view==="avg"
+    ?(metric==="input"?"Input $/1M tokens":"Output $/1M tokens")
+    :(metric==="input"?"Input, % change":"Output, % change");
   const cellColor=(v)=>v===null||v===undefined?"#9ca3af":v>0?"#dc2626":v<0?"#059669":"#6b7280";
 
   return(
@@ -964,7 +881,6 @@ function ModelPricingHistoryBlock(){
          forty cells were filled — the two disagreed on screen, and the chart
          was the one that was wrong. The matrix below carries the same series
          with its coverage and basis per cell. */}
-      {state.phase==="ready"&&<MeasureBreakCaption mb={state.data?.measureBreaks}/>}
 
       {/* ── Matrix section header (kept minimal — methodology lives at bottom) ── */}
       {state.phase==="ready"&&state.data?.quarters?.length>0&&(
@@ -1410,7 +1326,7 @@ function ModelPricingMatrixTable(){
         const basis=rep.priceBasis?.[metricKey]?.[p.id];
         return(
           <td key={p.id} style={{...tdMain,...bStyle(i)}} title={afterChangeTitle(basis,rep.basisExcludedObs?.[metricKey]?.[p.id])}>
-            {fmtPrice(val)}{basis&&val!=null&&afterChangeMark()}
+            {fmtPrice(val)}
           </td>
         );
       })}
@@ -1453,7 +1369,6 @@ function ModelPricingMatrixTable(){
   return(
     <div style={{marginBottom:16}}>
       {header}
-      <MeasureBreakCaption mb={data.measureBreaks}/>
       <div style={{border:"0.5px solid #e5e7eb",borderRadius:8,overflow:"hidden",background:"#f9fafb"}}>
         <div style={{overflowX:"auto"}}>
           <table style={{width:"100%",borderCollapse:"separate",borderSpacing:0,background:"#f3f4f6",minWidth:FIRST_COL_W+COL_W*periods.length}}>
@@ -1578,7 +1493,7 @@ function ModelPricingMatrixTable(){
                               const basis=row.priceBasis?.[section.key]?.[p.id];
                               return(
                                 <td key={p.id} style={{...tdMain,...bStyle(i)}} title={afterChangeTitle(basis)}>
-                                  {fmtPrice(val)}{basis&&val!=null&&afterChangeMark()}
+                                  {fmtPrice(val)}
                                 </td>
                               );
                             }
@@ -2416,15 +2331,29 @@ function finBoundaryStyle(isBoundary){
 // an empty one: "no data" and "these two numbers measure different things"
 // mean opposite things to a reader, so it is named, in the boundary's amber.
 // The reason goes on the cell's title, where the caller has it.
+/* The day before an ISO date. The methodology note states the last day of the
+   OLD measure, which is the day before the detected change; it used to be the
+   literal "2026-07-27", gated on a DERIVED value — correct only for as long as
+   the detected date stayed 2026-07-28. */
+function dayBefore(iso){
+  const d=new Date(iso+"T00:00:00Z");
+  if(isNaN(d)) return iso;
+  d.setUTCDate(d.getUTCDate()-1);
+  return d.toISOString().slice(0,10);
+}
+
+function refusalTag(kind){
+  return <span style={{color:"#b45309",fontSize:9,fontWeight:600,whiteSpace:"nowrap"}}>
+    {kind==="too_few_matched"?<>too&nbsp;few&nbsp;models</>:<>measure&nbsp;changed</>}
+  </span>;
+}
+
 function measureChangedTag(){
   return <span style={{color:"#b45309",fontSize:9,fontWeight:600,whiteSpace:"nowrap"}}>measure&nbsp;changed</span>;
 }
 
 // Marks a model price the source reported after it changed what it reports.
 // Same size and weight as the thin-coverage marker, in the boundary's amber.
-function afterChangeMark(){
-  return <sup style={{color:"#b45309",fontSize:8,fontWeight:700,marginLeft:1}}>&dagger;</sup>;
-}
 
 // Tooltip for a model price cell. basis is the date of the change it was
 // reported after (absent on the original measure); left counts observations
@@ -2666,22 +2595,6 @@ function GPUFinancialCorrelationBlock({fHist,fHistErr}){
         </div>
       )}
 
-      {/* Basis-change caption. This is the single most misread thing on the
-          page: the step between the two measures looks like a price move, so
-          it is stated in plain words directly above the table rather than
-          left to a tooltip. Deliberately a neutral caption, not a red alert —
-          the data is correct, it just changed units, and an alarm here would
-          read to a customer as "this product is broken". */}
-      {!illustrative&&hasBasisChange&&basisBoundary&&(
-        <div style={{background:"#fffbeb",border:"0.5px solid #fde68a",borderRadius:6,padding:"8px 11px",marginBottom:8,fontSize:11,color:"#92400e",lineHeight:1.55}}>
-          <b style={{fontWeight:700}}>The source changed what it publishes{basisChangeDate?" on "+basisChangeDate:""}.</b>{" "}
-          Through {basisBoundary.before.label} it gave a per-vendor price range and the figure below is the{" "}
-          <b style={{fontWeight:600}}>{FIN_BASIS_LABEL[basisBoundary.from]}</b>; from {basisBoundary.after.label} it publishes a single{" "}
-          <b style={{fontWeight:600}}>{FIN_BASIS_LABEL[basisBoundary.to]}</b>. A floor is the cheapest listing of ~50 vendors; a median is the middle one,
-          so the step at the dashed line is a change of measure, <b style={{fontWeight:600}}>not a price move</b> — like-for-like, prices have been broadly flat across it.
-          Growth is left uncomputed across the change rather than reported.
-        </div>
-      )}
 
       {/* Matrix or empty */}
       {!hasAnyData?(
@@ -2818,7 +2731,7 @@ function GPUFinancialCorrelationBlock({fHist,fHistErr}){
 
       {/* Methodology footnote — concise, customer-spec wording. */}
       <div style={{fontSize:10,color:"#9ca3af",lineHeight:1.5,marginTop:6}}>
-        <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> GPU prices are real daily observations averaged by SKU and calendar period — no estimates, no backfill. <b style={{color:"#6b7280",fontWeight:600}}>What the source publishes changed mid-history</b>, so a period carries one of two measures: through {basisChangeDate?"2026-07-27":"the earlier periods"} a per-vendor min–max range, of which the <b style={{color:"#6b7280",fontWeight:600}}>floor</b> (the single cheapest listing among ~50 providers) is shown; from {basisChangeDate||"the later periods"} a single <b style={{color:"#6b7280",fontWeight:600}}>median</b> across providers. The two are different statistics and their levels are not comparable — the floor is volatile and one outlier listing moves it, which is why it sits far below the median. A period that straddles the change takes the measure covering most of its days and averages only those days; its tooltip names the other measure and what it averaged. Growth is computed only between periods sharing a measure and only between completed periods; a period still in progress (QTD/MTD) is suppressed, and a cell spanning the change reads <span style={{color:"#b45309",fontWeight:600}}>measure changed</span> rather than a fabricated percentage. A <sup style={{color:"#b45309",fontWeight:700}}>&deg;</sup> marks a value resting on a period where under {Math.round(FIN_LOW_COVERAGE*100)}% of days carry a price. The column axis is continuous, so a period with no capture stays visible as an empty column. GPU prices are not summed, because there is no meaningful total price across SKUs. Provider count shows observed vendor breadth where available. Stable or rising prices in older GPUs can indicate tight supply or strong ROI.
+        <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> GPU prices are real daily observations averaged by SKU and calendar period — no estimates, no backfill. <b style={{color:"#6b7280",fontWeight:600}}>What the source publishes changed mid-history</b>, so a period carries one of two measures: through {basisChangeDate?dayBefore(basisChangeDate):"the earlier periods"} a per-vendor min–max range, of which the <b style={{color:"#6b7280",fontWeight:600}}>floor</b> (the single cheapest listing among ~50 providers) is shown; from {basisChangeDate||"the later periods"} a single <b style={{color:"#6b7280",fontWeight:600}}>median</b> across providers. The two are different statistics and their levels are not comparable — the floor is volatile and one outlier listing moves it, which is why it sits far below the median. A period that straddles the change takes the measure covering most of its days and averages only those days; its tooltip names the other measure and what it averaged. Growth is computed only between periods sharing a measure and only between completed periods; a period still in progress (QTD/MTD) is suppressed, and a cell spanning the change reads <span style={{color:"#b45309",fontWeight:600}}>measure changed</span> rather than a fabricated percentage. A <sup style={{color:"#b45309",fontWeight:700}}>&deg;</sup> marks a value resting on a period where under {Math.round(FIN_LOW_COVERAGE*100)}% of days carry a price. The column axis is continuous, so a period with no capture stays visible as an empty column. GPU prices are not summed, because there is no meaningful total price across SKUs. Provider count shows observed vendor breadth where available. Stable or rising prices in older GPUs can indicate tight supply or strong ROI.
       </div>
     </div>
   );
@@ -4054,7 +3967,8 @@ export default function App(){
   const[tab,setTab]=useState("pricing");
   const[refreshTick,setRefreshTick]=useState(0);
 
-  // The header's timestamp. It was first a build-time literal (LIVE.fetchedAt,
+  // The header's timestamp. It was first a build-time literal (the `LIVE`
+  // fixture's fetchedAt, since removed —
   // "Apr 11 2026 · 17:45 UTC") that was stale for every visitor from the day it
   // was written, then the moment a refresh STARTED — which read as "these
   // figures are from now" even when every fetch after it failed. It is now the

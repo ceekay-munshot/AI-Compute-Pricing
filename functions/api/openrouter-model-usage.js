@@ -171,38 +171,14 @@ async function readWeeks(kv, index) {
   return got.filter(Boolean).sort((a, b) => (a.start < b.start ? -1 : 1));
 }
 
-/**
- * Fetch upstream and store it if the capture qualifies. Never throws: a failed
- * or unqualified capture leaves whatever is already stored untouched, because
- * the accumulated history is worth more than any single fetch.
- */
-async function captureNow(kv, todayISO) {
-  const result = { attempted: true, stored: false, weekStart: null, reason: null, models: 0 };
-  const attribution = attributableWeek(todayISO);
-  try {
-    const { rows } = await fetchModelUsage('week');
-    result.models = new Set(rows.filter(r => r.variant === 'standard').map(r => r.slug)).size;
-    if (!attribution.weekStart) {
-      result.reason = attribution.reason;
-      return result;
-    }
-    if (!kv) { result.reason = 'HISTORY_KV not bound'; return result; }
-    const payload = toWeekPayload(rows, attribution.weekStart);
-    payload.capturedAt = new Date().toISOString();
-    await kv.put(KV_PREFIX + attribution.weekStart, JSON.stringify(payload));
-    const index = await readIndex(kv);
-    if (!index.includes(attribution.weekStart)) {
-      index.push(attribution.weekStart);
-      index.sort();
-      await kv.put(KV_INDEX, JSON.stringify(index));
-    }
-    result.stored = true;
-    result.weekStart = attribution.weekStart;
-  } catch (e) {
-    result.reason = e instanceof RankingsError ? e.message : ('capture failed: ' + e.message);
-  }
-  return result;
-}
+/* captureNow() — REMOVED. google-dash is the sole writer of HISTORY_KV.
+ * Upstream this function fetches the current ranking and banks it under
+ * or-usage:<week>, updating or-usage:index. It was already unreachable here
+ * (the GET handler below never called it) but still held two live kv.put
+ * calls, so one future call site would have re-armed a second writer on a
+ * shared namespace. Two writers corrupt the index and break both
+ * dashboards, so the code is gone rather than merely unused. The read path
+ * is untouched. Pinned by __tests__/no-kv-writes.test.mjs. */
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);

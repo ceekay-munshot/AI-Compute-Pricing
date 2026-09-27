@@ -2,7 +2,9 @@
  * OpenRouter weekly token series — captured snapshot.
  *
  * BOOTSTRAP / EMERGENCY FALLBACK ONLY. The live source of truth is the
- * scheduled browser capture (.github/workflows/openrouter-capture.yml), which
+ * scheduled browser capture in the google-dash repo
+ * (.github/workflows/openrouter-capture.yml THERE — this repo has no .github
+ * directory and runs no capture of its own), which
  * writes fresh weeks into HISTORY_KV. This snapshot only guarantees the charts
  * render before the first capture runs, or if HISTORY_KV is ever empty.
  * Captured weeks in HISTORY_KV always override and extend these.

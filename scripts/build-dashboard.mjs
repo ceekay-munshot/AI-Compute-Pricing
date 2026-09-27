@@ -38,15 +38,19 @@ const BUNDLE_OPENER = '(()=>{var ';
  * A short content hash of the dashboard source, injected as __BUILD__ and used
  * as a cache key on the API fetches.
  *
- * The API caches its responses at the edge for six hours, which is what keeps
+ * The API caches its responses at the edge (one hour; the TTL was cut from six),
+ * which is what keeps
  * a 35MB upstream fan-out affordable. The cost is that a deploy could not
  * reach anyone until that cache expired — a fix would sit invisible for hours
  * while the old payload kept being served. An earlier attempt used a
  * five-minute time bucket instead, which gave every bucket its own cache key,
  * re-ran the fan-out constantly and took the upstream down.
  *
- * Hashing the SOURCE gets both: the key changes exactly once per code change,
- * so a deploy invalidates the cache once and then caches normally. It is
+ * Hashing the SOURCE gets both: the key changes exactly once per code change, so
+ * a deploy gets past the READER's browser cache once and then caches normally.
+ * Note this busts the browser cache only — _edge-cache.js builds its key from the
+ * named params plus CACHE_SCHEMA and deliberately ignores `b`, so a caller cannot
+ * trigger an upstream fan-out. Bump CACHE_SCHEMA to invalidate the edge. It is
  * derived from file contents rather than a timestamp so the build stays
  * deterministic and `--check` remains a reliable guard.
  */

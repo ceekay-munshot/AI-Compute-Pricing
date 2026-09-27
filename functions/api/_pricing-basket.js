@@ -18,7 +18,7 @@
  *     the UI surfaces the coverage ratio so the reader can judge.
  *
  *   - Broad enough to represent the market:
- *       8 providers × 1–4 flagship tiers each = 16 models.
+ *       7 providers × 1–4 flagship tiers each = 16 models.
  *
  * Adding / removing: treat this file like schema. When adding a new slug,
  * remember that it will have no history before the day you added it —

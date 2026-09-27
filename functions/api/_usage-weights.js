@@ -411,7 +411,8 @@ export function buildUsageWeights(modelSeries, providerSeries, resolvePriced) {
  *          reader can tell a genuine blend from a number one model dominates —
  *          "4 models" alone does not distinguish the two.
  */
-export function weightedAverage(modelWeights, coverage, seriesAvailable = true) {
+export function weightedAverage(modelWeights, coverage, seriesAvailable = true,
+  seriesGate = 'series-unavailable') {
   let cost = 0;
   let tokens = 0;
   let models = 0;
@@ -436,7 +437,7 @@ export function weightedAverage(modelWeights, coverage, seriesAvailable = true) 
   // anything, and reporting it as zero volume would be a false statement
   // about the market rather than about our data.
   if (!seriesAvailable) {
-    return { avg: null, provisional: null, models: 0, coverage: null, topShare: null, gate: 'series-unavailable' };
+    return { avg: null, provisional: null, models: 0, coverage: null, topShare: null, gate: seriesGate };
   }
   if (tokens <= 0) {
     return { avg: null, provisional: null, models: 0, coverage, topShare: null, gate: 'no-usage' };
@@ -465,6 +466,11 @@ export function gateReason(gate, coverage, models) {
     case 'series-unavailable':
       return 'The OpenRouter weekly token series could not be loaded, so no weights ' +
         'could be built. This says nothing about actual usage.';
+    case 'provider-series-stale':
+      return 'The live OpenRouter market-share dataset could not be read, and the ' +
+        'captured provider totals behind it are months old — too stale to serve as ' +
+        'a denominator for this quarter. Weighting against them would divide current ' +
+        'spend by a stale share. This says nothing about actual usage.';
     case 'no-usage':
       return 'No paid OpenRouter token volume recorded for this provider in this quarter ' +
         '(free-tier variants are excluded from paid weights).';

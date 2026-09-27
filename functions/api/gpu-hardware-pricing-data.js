@@ -99,7 +99,7 @@ const LAST_GOOD_TTL = 24 * 3600;
 // hands it back untouched, headers included, and puts nothing. The reader's
 // own browser may still keep it for a minute, which bounds how often one
 // reader can send us to a source that is refusing us. Pinned by
-// __tests__/gpu-stale-fallback.test.mjs.
+// __tests__/gpu-listing-fallback.test.mjs.
 const FALLBACK_CACHE_CONTROL = 'private, max-age=60';
 
 const UA =
