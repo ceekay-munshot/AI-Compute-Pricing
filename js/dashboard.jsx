@@ -972,9 +972,13 @@ function ModelPricingHistoryBlock(){
                         // direction. Only real metadata is shown — a model count
                         // and coverage where the weighting produced them, nothing
                         // otherwise. No figure here is invented to dress the cell.
-                        sub=c.weightedModelCount
-                          ?c.weightedModelCount+(c.weightedModelCount===1?" model":" models")+(c.coverageLabel?" · "+c.coverageLabel+" covered":"")
-                          :"";
+                        // weightedModelCount and coverageLabel describe the
+                        // WEIGHTED computation the gate withheld — a different,
+                        // smaller set of models than the estimate rests on. The
+                        // estimate is this quarter's list-price lineup average
+                        // scaled by a ratio, so the lineup count is the honest
+                        // figure and coverage does not apply to it at all.
+                        sub=c.modelCount?c.modelCount+(c.modelCount===1?" model":" models"):"";
                       }
                     }
                     // Grey marks an EMPTY cell, not an estimated one. An estimate is
@@ -1047,10 +1051,22 @@ function ModelPricingHistoryBlock(){
          whether a number is measured or estimated, and where it came from.
          Every cell still carries its own coverage, model count and — for an
          estimate — its basis, on hover. */}
-      <div style={{fontSize:10,color:"#6b7280",marginTop:8,lineHeight:1.5}}>
+      {state.data?.degraded&&(
+        <div style={{fontSize:11,color:"#92400e",marginTop:6,lineHeight:1.5}}
+             title={(state.data.providerErrors||[]).map(e=>e.slug+": "+e.error).join(" · ")||undefined}>
+          {(() => {
+            const n=(state.data.providerErrors||[]).length;
+            const who=(state.data.providerErrors||[]).map(e=>e.slug).join(", ");
+            return n
+              ? "Incomplete: "+(n===1?"one provider":n+" providers")+" ("+who+") could not be read on this load, so "+(n===1?"it is":"they are")+" missing from the table below."
+              : "Incomplete: at least one provider could not be read on this load and is missing from the table below.";
+          })()}
+        </div>
+      )}
+      <div style={{fontSize:10,color:"#9ca3af",lineHeight:1.5,marginTop:6}}>
         {showYoYStart&&<><b style={{color:"#374151"}}>{yoyStartQ?"YoY starts "+yoyStartQ:"No YoY yet"}</b>{" — the source's history begins "+(state.data?.earliestDateObserved||firstQ)+", so earlier quarters have no year-ago quarter"}<br/></>}
         <b style={{color:"#374151"}}>{unitHint}</b>
-        {" · "}pricepertoken list prices{weighted?", weighted by OpenRouter token volume":""}
+        {" · "}pricepertoken list prices{weighted?", weighted by OpenRouter token volume where it could be measured":""}
         {weighted&&<>{" · "}hover any cell for its coverage and basis</>}
         {openness&&<>{" · "}<b style={{color:"#374151",fontWeight:600}}>open-weight</b> = weights published to download, any licence; <b style={{color:"#374151",fontWeight:600}}>proprietary</b> = API-only · classed per model, so Gemma and gpt-oss count as open · hover a column for its labs</>}
         {" · from "}{state.data?.earliestDateObserved||"2025-07-28"}

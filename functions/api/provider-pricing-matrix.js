@@ -1018,7 +1018,9 @@ function overlayRichModelWeeks(chartSeries, richSeries, metric) {
    captures normally sit 0-1 weeks back (the current week is still filling), so
    the threshold allows a couple of missed runs before it counts as abandoned.
    Infinity when there is no week at all, which reads as maximally stale. */
-const MAX_PROVIDER_SERIES_WEEKS_BEHIND = 3;
+const MAX_SERIES_WEEKS_BEHIND = 3;
+// Kept under its old name for the provider path's existing references.
+const MAX_PROVIDER_SERIES_WEEKS_BEHIND = MAX_SERIES_WEEKS_BEHIND;
 
 function currentIsoWeekStart() {
   const d = new Date();
@@ -1200,8 +1202,23 @@ async function buildProviderMatrix(request, metric, weight, group = 'company') {
     const providerWeeksBehind = weeksBehindIsoWeek(providerCapturedLatest);
     const providerSeriesStale = !liveOk
       && providerWeeksBehind > MAX_PROVIDER_SERIES_WEEKS_BEHIND;
+    // The provider series got a staleness gate; the MODEL series did not, and
+    // it is the other half of the same division. Its own fallback is the
+    // bundled seed (_openrouter-chart-seed.js, captured 2026-05-20), served
+    // silently as a normal 200 when KV is empty — so a dead capture upstream
+    // would weight this quarter's prices by May's usage and publish the result
+    // as measured. Verified healthy on 2026-09-23 (weeksBehind 0), which is
+    // exactly why this needs a guard rather than an assumption.
     const { series: modelSeries, richWeeks } =
       overlayRichModelWeeks(chartSeries, richSeries, metric);
+    // overlayRichModelWeeks returns { series: { weeks: [...] } } — the response
+    // OBJECT, not the array. Wrapping it again made lastWeekStart see a non-array
+    // and return null, so weeksBehind was Infinity and the gate fired on every
+    // request. The existing tests did not catch it: they assert only that the
+    // PROVIDER gate is or is not set, and the provider branch is checked first.
+    const modelCapturedLatest = lastWeekStart(modelSeries);
+    const modelWeeksBehind = weeksBehindIsoWeek(modelCapturedLatest);
+    const modelSeriesStale = !!modelSeries && modelWeeksBehind > MAX_SERIES_WEEKS_BEHIND;
 
     const built = buildUsageWeights(
       modelSeries, providerSeries, makeModelResolver(results, metric, book, levels),
@@ -1209,14 +1226,29 @@ async function buildProviderMatrix(request, metric, weight, group = 'company') {
     // Both series are required. Without the model series there are no weights;
     // without the provider series there is no denominator to certify them
     // against. Either way the weighted view has nothing it can honestly say.
-    const seriesAvailable = !!modelSeries && !!providerSeries && !providerSeriesStale;
+    // NOTE: neither staleness flag belongs here, and both used to be.
+    //
+    // buildUsageWeights keys tokens by their own quarter and certifies a
+    // quarter only when every week present in either series is present in
+    // BOTH (see its pass 1 / pass 2 and uncertifiedQuarters). A series that
+    // stops in May therefore leaves the recent quarters with no weeks at all,
+    // no coverage entry, and a 'coverage-unknown' refusal — already withheld,
+    // per quarter, without anything global.
+    //
+    // Putting staleness in this flag additionally blanked every HISTORICAL
+    // quarter whose model and provider weeks were complete and contemporaneous
+    // — data that is perfectly good and was already certified. It withheld far
+    // more than the fault justified. The flags are kept below as diagnostics.
+    const seriesAvailable = !!modelSeries && !!providerSeries;
     weighting = {
       weights: built.weights,
       coverage: built.coverage,
       seriesAvailable,
       // Which refusal it is, so the cell can say the true reason rather than
       // claiming the series could not be loaded when it loaded and was stale.
-      seriesGate: providerSeriesStale ? 'provider-series-stale' : 'series-unavailable',
+      // Only one global refusal remains: a series that did not load at all.
+      // Staleness is handled per quarter by buildUsageWeights, above.
+      seriesGate: 'series-unavailable',
     };
     weightMeta = {
       source: 'weights from openrouter.ai/rankings weekly token series; provider totals ' +
@@ -1230,7 +1262,14 @@ async function buildProviderMatrix(request, metric, weight, group = 'company') {
         Number.isFinite(providerWeeksBehind) ? providerWeeksBehind : null,
       // True only when the live read failed AND the fallback is too old to
       // stand in for it. Not "the capture is stale" — that alone is harmless.
+      // Diagnostics, not gates. True means the fallback is old enough to be
+      // worth knowing about; the per-quarter certification decides what is
+      // actually withheld.
       providerSeriesStale,
+      modelSeriesCapturedLatestWeek: modelCapturedLatest,
+      modelSeriesCapturedWeeksBehind:
+        Number.isFinite(modelWeeksBehind) ? modelWeeksBehind : null,
+      modelSeriesStale,
       // Weeks whose weights came from the full ~500-model catalogue rather
       // than the top-9 chart. Coverage on these is not capped by the chart,
       // and input/output are weighted by prompt/completion tokens separately.

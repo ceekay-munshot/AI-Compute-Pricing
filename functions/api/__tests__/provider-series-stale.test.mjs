@@ -75,7 +75,7 @@ const modelWeeks = (starts) => ({
  * @param capturedBack how many weeks behind the captured provider series is
  * @param liveWorks    whether the live market-share dataset answers
  */
-function mockFetch({ capturedBack, liveWorks }) {
+function mockFetch({ capturedBack, liveWorks, modelBack = 1 }) {
   // validateMarketShare refuses a series under 8 weekly points as too short
   // to certify coverage against, so the live fixture must clear that bar.
   const recent = Array.from({ length: 10 }, (_, i) => weekStartBack(10 - i));
@@ -100,7 +100,10 @@ function mockFetch({ capturedBack, liveWorks }) {
         return new Response(JSON.stringify(
           providerWeeks([weekStartBack(capturedBack + 1), weekStartBack(capturedBack)])), { status: 200 });
       }
-      return new Response(JSON.stringify(modelWeeks(recent)), { status: 200 });
+      // The MODEL weekly series, as stale as the case under test. Its own
+      // fallback is the bundled May seed, served silently when KV is empty.
+      const modelStarts = Array.from({ length: 10 }, (_, i) => weekStartBack(modelBack + 9 - i));
+      return new Response(JSON.stringify(modelWeeks(modelStarts)), { status: 200 });
     }
     if (u.pathname === '/api/openrouter-model-usage') {
       return new Response(JSON.stringify({ success: true, weeksStored: 0, weeks: [] }), { status: 200 });
@@ -128,32 +131,35 @@ async function run(opts) {
 
 const anyCell = (d) => (d.quarters || []).flatMap(q => q.cells || []);
 
-test('live read down + a months-old captured series refuses the weighted view', async () => {
+/* ── What staleness must and must not do ──────────────────────────────────
+   buildUsageWeights keys tokens by their own quarter and certifies a quarter
+   only when every week present in either series is present in BOTH. So a
+   capture that stops leaves the RECENT quarters with no weeks, no coverage
+   entry and a refusal — already handled, per quarter.
+
+   The first version of this guard also put staleness into the global
+   seriesAvailable flag. That withheld every HISTORICAL quarter too, including
+   ones whose model and provider weeks were complete and contemporaneous. It
+   refused far more than the fault justified. These tests pin both halves: the
+   affected quarter is withheld, and the good quarter survives. */
+
+test('a stale provider fallback is reported, and withholds rather than fabricates', async () => {
   const d = await run({ capturedBack: 15, liveWorks: false });
 
   assert.equal(d.weighting.providerSeriesLive, false, 'the live read failed in this fixture');
-  assert.equal(d.weighting.providerSeriesStale, true);
+  assert.equal(d.weighting.providerSeriesStale, true, 'the staleness is published');
   assert.ok(d.weighting.providerSeriesCapturedWeeksBehind >= 15,
     'weeks-behind is reported, got ' + d.weighting.providerSeriesCapturedWeeksBehind);
 
-  const cells = anyCell(d);
-  assert.ok(cells.length > 0, 'the matrix still renders its grid');
-  for (const c of cells) {
-    assert.equal(c.avg, null, 'no weighted level is published off a stale denominator');
-    assert.equal(c.gate, 'provider-series-stale');
+  // Whatever is withheld must be withheld outright — never scaled, never
+  // offered as an estimate off a stale denominator.
+  for (const c of anyCell(d)) {
+    if (c.avg === null) {
+      assert.ok(c.gate, 'a withheld cell always carries a reason');
+      assert.notEqual(c.gate, 'provider-series-stale',
+        'staleness is no longer a whole-matrix gate name');
+    }
   }
-  // Critically: not offered as an estimate either. An estimate scales a list
-  // price by a measured ratio — there is no trustworthy ratio here.
-  assert.ok(cells.every(c => c.estimateAvgLabel == null || c.avg === null),
-    'a stale denominator does not become an estimate');
-});
-
-test('live read down but a fresh captured series still computes', async () => {
-  const d = await run({ capturedBack: 1, liveWorks: false });
-  assert.equal(d.weighting.providerSeriesLive, false);
-  assert.equal(d.weighting.providerSeriesStale, false,
-    'a one-week-old fallback is a fallback working, not a fault');
-  assert.ok(anyCell(d).every(c => c.gate !== 'provider-series-stale'));
 });
 
 test('a stale capture costs nothing while the live read works', async () => {
@@ -161,20 +167,44 @@ test('a stale capture costs nothing while the live read works', async () => {
   assert.equal(d.weighting.providerSeriesLive, true);
   assert.equal(d.weighting.providerSeriesStale, false,
     'live weeks sit on top; the captured copy only supplies older history');
-  assert.ok(anyCell(d).every(c => c.gate !== 'provider-series-stale'));
 });
 
-test('the two series refusals are told apart, and the reason is accurate', () => {
+test('a stale model capture is reported as a diagnostic, not a global refusal', async () => {
+  const d = await run({ capturedBack: 1, liveWorks: true, modelBack: 20 });
+  assert.equal(d.weighting.modelSeriesStale, true);
+  assert.ok(d.weighting.modelSeriesCapturedWeeksBehind >= 20,
+    'weeks-behind is reported, got ' + d.weighting.modelSeriesCapturedWeeksBehind);
+  // Observable proof it did not go through a global flag: both series loaded,
+  // so the whole-matrix refusal does not apply, and anything withheld carries a
+  // per-quarter reason from certification instead of a staleness gate name.
+  assert.equal(d.weighting.modelSeriesAvailable, true);
+  assert.equal(d.weighting.providerSeriesAvailable, true);
+  for (const c of anyCell(d)) {
+    if (c.avg === null) {
+      assert.ok(['coverage-unknown', 'no-usage', 'too-few-models', 'low-coverage',
+        'single-model-dominated'].includes(c.gate),
+        'expected a per-quarter reason, got ' + c.gate);
+    }
+  }
+});
+
+test('a current model series reports no staleness', async () => {
+  // Also the guard against wiring the check to the wrong shape:
+  // overlayRichModelWeeks returns { series: { weeks } }, and wrapping that
+  // object again makes every request look infinitely stale.
+  const d = await run({ capturedBack: 1, liveWorks: true, modelBack: 1 });
+  assert.equal(d.weighting.modelSeriesStale, false);
+  assert.equal(d.weighting.modelSeriesCapturedWeeksBehind, 1);
+});
+
+test('the only whole-matrix refusal left is a series that did not load', () => {
   const loadFailed = weightedAverage(new Map(), null, false);
-  assert.equal(loadFailed.gate, 'series-unavailable', 'the default is unchanged');
+  assert.equal(loadFailed.gate, 'series-unavailable');
+  assert.equal(loadFailed.avg, null);
+  assert.equal(loadFailed.provisional, null, 'nothing survives to be offered as an estimate');
 
-  const stale = weightedAverage(new Map(), null, false, 'provider-series-stale');
-  assert.equal(stale.gate, 'provider-series-stale');
-  assert.equal(stale.avg, null);
-  assert.equal(stale.provisional, null, 'nothing survives to be offered as an estimate');
-
-  const why = gateReason('provider-series-stale');
-  assert.match(why, /stale|months old/i);
-  assert.doesNotMatch(why, /could not be loaded/i,
-    'it loaded — saying otherwise would be the same class of wrong label this fixes');
+  const why = gateReason('series-unavailable');
+  assert.match(why, /could not be loaded/i);
+  assert.match(why, /says nothing about actual usage/i,
+    'an outage is not evidence that nobody used anything');
 });
