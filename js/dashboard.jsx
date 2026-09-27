@@ -2358,6 +2358,13 @@ function measureChangedTag(){
 // Tooltip for a model price cell. basis is the date of the change it was
 // reported after (absent on the original measure); left counts observations
 // from the other side of the change that the average leaves out.
+/* The post-change price marker. MeasureBreakCaption is its legend: its closing
+   sentence is "A † marks a price reported after the change." Restored after a merge
+   dropped the definition while keeping its call site — see the commit message. */
+function afterChangeMark(){
+  return <sup style={{color:"#b45309",fontSize:8,fontWeight:700,marginLeft:1}}>&dagger;</sup>;
+}
+
 function afterChangeTitle(basis,left){
   const parts=[];
   if(basis)parts.push("As the source reports it after its "+basis+" change — not comparable with figures from before that date.");
