@@ -24,6 +24,19 @@
  * comments and string literals are stripped. What is left is code, and every
  * name called in it must resolve to an import, a declaration, a parameter, or a
  * known runtime global.
+ *
+ * WHAT IT DOES NOT CATCH. Bindings are collected into one file-wide set, not
+ * per lexical scope, so a name bound anywhere satisfies a call everywhere:
+ *
+ *   function a(missing) {}        // binds `missing` as a parameter
+ *   function b() { missing(); }   // passes here, throws at runtime
+ *
+ * Closing that needs a real scope-aware parser, which is more machinery than
+ * this earns. The gap is narrower than the failure it exists for: a helper
+ * deleted outright is bound NOWHERE, so it is caught, and it is only missed if
+ * its name happens to coincide with a parameter or local elsewhere in the file.
+ * Read a pass as "no deleted helper is still being called", not as a full
+ * reference check.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';

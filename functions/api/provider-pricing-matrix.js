@@ -1226,17 +1226,29 @@ async function buildProviderMatrix(request, metric, weight, group = 'company') {
     // Both series are required. Without the model series there are no weights;
     // without the provider series there is no denominator to certify them
     // against. Either way the weighted view has nothing it can honestly say.
-    const seriesAvailable = !!modelSeries && !!providerSeries
-      && !providerSeriesStale && !modelSeriesStale;
+    // NOTE: neither staleness flag belongs here, and both used to be.
+    //
+    // buildUsageWeights keys tokens by their own quarter and certifies a
+    // quarter only when every week present in either series is present in
+    // BOTH (see its pass 1 / pass 2 and uncertifiedQuarters). A series that
+    // stops in May therefore leaves the recent quarters with no weeks at all,
+    // no coverage entry, and a 'coverage-unknown' refusal — already withheld,
+    // per quarter, without anything global.
+    //
+    // Putting staleness in this flag additionally blanked every HISTORICAL
+    // quarter whose model and provider weeks were complete and contemporaneous
+    // — data that is perfectly good and was already certified. It withheld far
+    // more than the fault justified. The flags are kept below as diagnostics.
+    const seriesAvailable = !!modelSeries && !!providerSeries;
     weighting = {
       weights: built.weights,
       coverage: built.coverage,
       seriesAvailable,
       // Which refusal it is, so the cell can say the true reason rather than
       // claiming the series could not be loaded when it loaded and was stale.
-      seriesGate: providerSeriesStale ? 'provider-series-stale'
-        : modelSeriesStale ? 'model-series-stale'
-        : 'series-unavailable',
+      // Only one global refusal remains: a series that did not load at all.
+      // Staleness is handled per quarter by buildUsageWeights, above.
+      seriesGate: 'series-unavailable',
     };
     weightMeta = {
       source: 'weights from openrouter.ai/rankings weekly token series; provider totals ' +
@@ -1250,6 +1262,9 @@ async function buildProviderMatrix(request, metric, weight, group = 'company') {
         Number.isFinite(providerWeeksBehind) ? providerWeeksBehind : null,
       // True only when the live read failed AND the fallback is too old to
       // stand in for it. Not "the capture is stale" — that alone is harmless.
+      // Diagnostics, not gates. True means the fallback is old enough to be
+      // worth knowing about; the per-quarter certification decides what is
+      // actually withheld.
       providerSeriesStale,
       modelSeriesCapturedLatestWeek: modelCapturedLatest,
       modelSeriesCapturedWeeksBehind:

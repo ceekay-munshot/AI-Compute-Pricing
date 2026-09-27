@@ -466,16 +466,11 @@ export function gateReason(gate, coverage, models) {
     case 'series-unavailable':
       return 'The OpenRouter weekly token series could not be loaded, so no weights ' +
         'could be built. This says nothing about actual usage.';
-    case 'model-series-stale':
-      return 'The OpenRouter weekly per-model token series is months behind, so ' +
-        'the weights would come from stale usage rather than this quarter\'s. ' +
-        'Weighting current prices by old volumes would misreport what was paid. ' +
-        'This says nothing about actual usage.';
-    case 'provider-series-stale':
-      return 'The live OpenRouter market-share dataset could not be read, and the ' +
-        'captured provider totals behind it are months old — too stale to serve as ' +
-        'a denominator for this quarter. Weighting against them would divide current ' +
-        'spend by a stale share. This says nothing about actual usage.';
+    // 'model-series-stale' and 'provider-series-stale' were gate names here.
+    // They are gone because staleness is not a whole-matrix refusal: a stale
+    // capture leaves the affected quarters uncertified and they refuse as
+    // 'coverage-unknown', while quarters covered by both captures stay valid.
+    // See the note beside seriesAvailable in provider-pricing-matrix.js.
     case 'no-usage':
       return 'No paid OpenRouter token volume recorded for this provider in this quarter ' +
         '(free-tier variants are excluded from paid weights).';
