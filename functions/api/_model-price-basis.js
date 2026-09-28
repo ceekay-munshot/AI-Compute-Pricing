@@ -29,7 +29,11 @@
  * This module is modelled on _gpu-price-basis.js, which solves the same
  * problem for the GPU feed's 2026-07-28 change: find the change from the data,
  * tag every observation with the measure it sits on, average each period on
- * one measure, and refuse growth between periods on different measures.
+ * one measure, and LINK growth between periods on different measures — a
+ * model the change moved is compared at its reported price times the inverse
+ * of the exact factor, which is its figure on the earlier measure. Growth is
+ * refused only where a model has no earlier figure to link to. (This summary
+ * said "refuse" after the linking work landed; the detail below was correct.)
  *
  * HOW A CHANGE OF MEASURE IS TOLD APART FROM A REAL PRICE CUT
  * ────────────────────────────────────────────────────────────

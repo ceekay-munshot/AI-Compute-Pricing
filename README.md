@@ -105,9 +105,10 @@ refresh happens **without remounting**, so a reader keeps their tab, subtab,
 toggles and scroll position; a failed background refresh leaves what is on
 screen alone rather than replacing it with an error, and a later one that
 succeeds clears an error the first load raised. Left alone is not left silent:
-once a refresh fails with a block's figures more than 15 minutes old, the block
-shows an amber *Not updated since …* line with the time, which clears on the
-next refresh that lands. The header's *Last loaded* time is the last time this
+once a refresh fails, the block keeps the figures it has rather than blanking
+them. (An amber *Not updated since …* line used to appear here; it went with the
+other customer-facing alarms and no longer exists. GPU → Infra Monitoring is the
+one place that still changes its wording when the data it shows is not current.) The header's *Last loaded* time is the last time this
 page actually received figures, not when a refresh was started — and not how
 old the figures themselves are, which the table above bounds. The
 reverse-proxied embeds reload only on the return-to-a-hidden-tab path, never
@@ -146,10 +147,11 @@ repo has deliberately moved first, and they are all presentation:
   of a build-time literal that had gone five months stale. (For a while it was
   the time a refresh started, which vouched for freshness even when every fetch
   after it failed.)
-- **Figures that are not current say so.** A block whose refreshes keep failing
-  shows an amber *Not updated since …* line, and GPU → Infra Monitoring stops
-  saying *Live* and shows the listing's capture time whenever the prices on
-  screen come from an earlier capture. google-dash fetches once and never
+- **Figures that are not current say so — on the GPU listing.** GPU → Infra
+  Monitoring stops saying *Live* and shows the listing's capture time whenever
+  the prices on screen come from an earlier capture. The amber *Not updated
+  since …* line that used to do this for every block was removed with the other
+  customer-facing alarms. google-dash fetches once and never
   refreshes, so it has no failed refresh to report.
 - **GPU → Infra Monitoring no longer carries a *Source updated* clause.** It
   read the listing's own "Updated …" caption with a pattern written for the
@@ -163,20 +165,26 @@ repo has deliberately moved first, and they are all presentation:
   and the `HISTORY_KV` binding name no longer appear on screen. Methodology
   footnotes and every coverage marker were kept — they explain the data rather
   than the machinery.
-- **The model-pricing basis-change banner was removed too**, at the owner's
-  request. The amber caption above the Quarterly Pricing Matrix and the peer
-  matrix — the one that announced the 2026-07-10 change — is gone, and so is the
-  `†` post-change price marker, because that caption was its only legend and a
-  lone dagger with no key is worse than none.
+- **The model-pricing basis caption is a neutral note, not an alarm.** The amber
+  banner that announced the 2026-07-10 change was removed at the owner's request.
+  What replaced it is a plain grey caption above the Quarterly Pricing Matrix,
+  carrying the server's account of what changed and when, and acting as the
+  legend for the `†` marker on post-change prices.
 
-  **The refusal itself is untouched.** Growth spanning the change is still never
-  computed; `_model-price-basis.js` is unchanged. Only the announcement went.
-  What a reader still gets: the plain-words `measure changed` tag in a refused
-  cell, the per-cell hover carrying the server's reason for it, the dashed rule
-  in the peer matrix, and one clause in that matrix's Methodology footnote. The
-  Quarterly Pricing Matrix has no on-screen explanation of the tag any more —
-  only the hover. The GPU tab keeps its own separate basis caption; it was not
-  part of this request.
+  Those two must ship together. An earlier pass removed the caption AND the
+  dagger (self-consistent); a later one restored the dagger without its caption,
+  leaving a bare marker with no key on screen — exactly the outcome the removal
+  was meant to avoid. Repaired. If either is ever removed again, remove both.
+
+  **Growth spanning the change is computed, not refused.** It is LINKED: a model
+  the change moved is compared at its reported price times the inverse of the
+  exact detected factor, which is its figure on the earlier measure. Growth is
+  refused only where a model has no earlier figure to link to — a model first
+  listed after the change — and those cells read `measure changed`. The
+  displayed LEVEL is still the figure the source reports today, so a touched
+  model shows a halved dollar amount beside a roughly flat percentage; that pair
+  is correct, and the caption is what explains it. The GPU tab keeps its own
+  separate basis handling, and there growth across the change IS refused.
 - **The two pricepertoken proxies inject extra CSS** to hide the upstream's own
   promo bar, newsletter signup and paid sponsor slots. Anchored on structure and
   `rel="sponsored"`, never on sponsor names, and scoped so the pricing table,
@@ -188,8 +196,8 @@ repo has deliberately moved first, and they are all presentation:
   it set `s-maxage`, but Pages Functions ignore `s-maxage` unless the handler uses
   the Cache API itself. `functions/api/_edge-cache.js` wraps it in `caches.default`.
   Measured on a preview deploy: 0.09s served from cache against a 2.3-4.0s
-  baseline, bodies byte-identical to the uncached ones. `metric` and `weight` are
-  both in the cache key; the client's `b=<build hash>` is deliberately not, since
+  baseline, bodies byte-identical to the uncached ones. `metric`, `weight` and
+  `group` are all in the cache key; the client's `b=<build hash>` is deliberately not, since
   it does not change the body and a caller-controlled key component would let
   each distinct value trigger another fan-out. The cache is per-PoP, so the
   first reader in each region still pays cold cost.
@@ -244,8 +252,9 @@ copied endpoints was removed here:
 
 Those three removals are what keeps this repo read-only, and each carries a
 comment saying so. They are no longer the only backend divergence: of the 27
-Functions files shared with google-dash, 10 have been modified here and 3 are new
-(`_edge-cache.js`, `_gpu-tracked-skus.js`, `_model-price-basis.js`). See
+Functions files shared with google-dash, 13 have been modified here and 5 are new
+(`_edge-cache.js`, `_gpu-tracked-skus.js`, `_gpu-weekly-history.js`,
+`_model-openness.js`, `_model-price-basis.js`). See
 [Divergence from google-dash](#divergence-from-google-dash).
 
 There are no capture scripts, cron triggers, scheduled workers, fixtures,
@@ -406,7 +415,7 @@ be re-spliced into `index.html` and committed alongside the `.jsx` change:
 npm install
 npm run build        # re-splice the bundle into index.html
 npm run build:check  # must print "index.html is up to date"
-npm test             # 146/146
+npm test             # 175/175
 ```
 
 `npm run build:check` is deterministic, so it is a reliable staleness guard.
@@ -458,7 +467,11 @@ the same way google-dash does.
    namespace id `322b0ca12e874e6a8568126e182e59f5` — for **both Production and
    Preview**. Preview left unbound makes
    `/api/gpu-hardware-pricing-history`'s `env?.HISTORY_KV` guard show the
-   "Quarter service temporarily unavailable" banner on preview deploys.
+   "Quarter service temporarily unavailable" banner on preview deploys — but that
+   tell no longer fires reliably, because the quarter view now reads
+   getdeploying's weekly file and usually renders without KV, so a forgotten
+   preview binding can pass unnoticed. Check `/api/history?meta=true` on the
+   preview URL instead: it needs KV and fails loudly without it.
 6. Redeploy once so the binding takes effect
 7. Allowlist the resulting `*.pages.dev` domain
 
