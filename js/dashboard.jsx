@@ -205,7 +205,18 @@ function PricingSharePartialView({ header, quarter, basis }){
       </div>
       {refusedRows.length>0&&(
         <div style={{fontSize:11,color:"#92400e",marginTop:-4,marginBottom:8,lineHeight:1.5}}>
-          {joinNames(refusedRows.map(r=>r.label))} {refusedRows.length===1?"is":"are"} left off the chart: the source changed how it reports {refusedRows.length===1?"its":"their"} prices between these quarters, so {refusedRows.length===1?"its":"their"} price change is not computed.
+          {(() => {
+            // Two refusals reach here, not one. Saying "the source changed how it
+            // reports its prices" about a provider actually refused for too few
+            // matched models states a cause that did not happen. The main view
+            // splits these; this fallback view did not.
+            const meas=refusedRows.filter(r=>r.priceRefusedKind!=="too_few_matched");
+            const few=refusedRows.filter(r=>r.priceRefusedKind==="too_few_matched");
+            const parts=[];
+            if(meas.length) parts.push(joinNames(meas.map(r=>r.label))+" "+(meas.length===1?"is":"are")+" left off the chart: the source changed how it reports "+(meas.length===1?"its":"their")+" prices between these quarters, so "+(meas.length===1?"its":"their")+" price change is not computed.");
+            if(few.length) parts.push(joinNames(few.map(r=>r.label))+" "+(few.length===1?"is":"are")+" left off the chart: too few of "+(few.length===1?"its":"their")+" models were priced in both quarters to compare like for like.");
+            return parts.join(" ");
+          })()}
         </div>
       )}
       {/* Callouts limited to what's computable from a single quarter */}
@@ -1051,6 +1062,11 @@ function ModelPricingHistoryBlock(){
          whether a number is measured or estimated, and where it came from.
          Every cell still carries its own coverage, model count and — for an
          estimate — its basis, on hover. */}
+      {/* The legend for the dagger drawn on post-change cells above. These two
+          were split apart when the banner removal and the dagger restoration
+          landed back to back: the table that prints the marker had no key, and
+          the only key that existed rendered nowhere. */}
+      <MeasureBreakCaption mb={state.data?.measureBreaks}/>
       {state.data?.degraded&&(
         <div style={{fontSize:11,color:"#92400e",marginTop:6,lineHeight:1.5}}
              title={(state.data.providerErrors||[]).map(e=>e.slug+": "+e.error).join(" · ")||undefined}>
@@ -2754,7 +2770,7 @@ function GPUFinancialCorrelationBlock({fHist,fHistErr}){
 
       {/* Methodology footnote — concise, customer-spec wording. */}
       <div style={{fontSize:10,color:"#9ca3af",lineHeight:1.5,marginTop:6}}>
-        <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> GPU prices are real daily observations averaged by SKU and calendar period — no estimates, no backfill. <b style={{color:"#6b7280",fontWeight:600}}>What the source publishes changed mid-history</b>, so a period carries one of two measures: through {basisChangeDate?dayBefore(basisChangeDate):"the earlier periods"} a per-vendor min–max range, of which the <b style={{color:"#6b7280",fontWeight:600}}>floor</b> (the single cheapest listing among ~50 providers) is shown; from {basisChangeDate||"the later periods"} a single <b style={{color:"#6b7280",fontWeight:600}}>median</b> across providers. The two are different statistics and their levels are not comparable — the floor is volatile and one outlier listing moves it, which is why it sits far below the median. A period that straddles the change takes the measure covering most of its days and averages only those days; its tooltip names the other measure and what it averaged. Growth is computed only between periods sharing a measure and only between completed periods; a period still in progress (QTD/MTD) is suppressed, and a cell spanning the change reads <span style={{color:"#b45309",fontWeight:600}}>measure changed</span> rather than a fabricated percentage. A <sup style={{color:"#b45309",fontWeight:700}}>&deg;</sup> marks a value resting on a period where under {Math.round(FIN_LOW_COVERAGE*100)}% of days carry a price. The column axis is continuous, so a period with no capture stays visible as an empty column. GPU prices are not summed, because there is no meaningful total price across SKUs. Provider count shows observed vendor breadth where available. Stable or rising prices in older GPUs can indicate tight supply or strong ROI.
+        <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> GPU prices are real daily observations averaged by SKU and calendar period — no estimates, no backfill. {hasBasisChange?<><b style={{color:"#6b7280",fontWeight:600}}>What the source publishes changed mid-history</b>, so a period carries one of two measures: through {basisChangeDate?dayBefore(basisChangeDate):"the earlier periods"} a per-vendor min–max range, of which the <b style={{color:"#6b7280",fontWeight:600}}>floor</b> (the single cheapest listing among ~50 providers) is shown; from {basisChangeDate||"the later periods"} a single <b style={{color:"#6b7280",fontWeight:600}}>median</b> across providers. The two are different statistics and their levels are not comparable — the floor is volatile and one outlier listing moves it, which is why it sits far below the median. A period that straddles the change takes the measure covering most of its days and averages only those days; its tooltip names the other measure and what it averaged.</>:<>Every period in this table is measured the same way — <b style={{color:"#6b7280",fontWeight:600}}>{priceBasisNote}</b> — so the levels are comparable end to end.</>} Growth is computed only between periods sharing a measure and only between completed periods; a period still in progress (QTD/MTD) is suppressed, and a cell spanning the change reads <span style={{color:"#b45309",fontWeight:600}}>measure changed</span> rather than a fabricated percentage. A <sup style={{color:"#b45309",fontWeight:700}}>&deg;</sup> marks a value resting on a period where under {Math.round(FIN_LOW_COVERAGE*100)}% of days carry a price. The column axis is continuous, so a period with no capture stays visible as an empty column. GPU prices are not summed, because there is no meaningful total price across SKUs. Provider count shows observed vendor breadth where available. Stable or rising prices in older GPUs can indicate tight supply or strong ROI.
       </div>
     </div>
   );
