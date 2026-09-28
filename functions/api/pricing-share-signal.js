@@ -503,6 +503,13 @@ export async function onRequestGet({ request }) {
         avg: c.avg,
         avgLabel: c.avgLabel,
         priceQoq,
+        // Carried so a callout can say what the figure rests on. The matrix
+        // renders this same number in lighter type under "5 of 18 models
+        // like-for-like"; a headline chip must not present it with more
+        // confidence than the table one tab away.
+        lowMatchedShare: c.qoqLowMatchedShare === true,
+        matchedModels: c.qoqMatchedModels ?? null,
+        lineupModels: c.qoqLineupModels ?? null,
         priceQoqLabel: measureChanged ? 'measure changed'
           : tooFewMatched ? 'too few models'
           : (typeof priceQoq === 'number') ? ((priceQoq >= 0 ? '+' : '') + (priceQoq * 100).toFixed(1) + '%') : '—',
@@ -570,6 +577,14 @@ export async function onRequestGet({ request }) {
     const shareRows = latestObj.rows.filter(x =>
       typeof x.shareQoqPP === 'number' && (typeof x.priceQoq === 'number' || x.priceRefused));
 
+    /* A price change computed over under half a provider's lineup is correct
+       and is published, but it describes the models that stayed rather than
+       the lineup. A callout is the sentence a reader repeats, so it says so. */
+    const matchedCaveat = (row) =>
+      (row && row.lowMatchedShare && row.matchedModels != null && row.lineupModels != null)
+        ? ' · ' + row.matchedModels + ' of ' + row.lineupModels + ' models like-for-like'
+        : '';
+
     const by = (fn) => [...r].sort(fn);
 
     const biggestCut = by((a,b) => a.priceQoq - b.priceQoq)[0];
@@ -577,7 +592,8 @@ export async function onRequestGet({ request }) {
       kind: 'biggest_price_cut',
       title: 'Biggest price cut',
       provider: biggestCut.label, slug: biggestCut.slug,
-      detail: biggestCut.priceQoqLabel + ' input · share ' + biggestCut.shareQoqLabel,
+      detail: biggestCut.priceQoqLabel + ' input · share ' + biggestCut.shareQoqLabel +
+        matchedCaveat(biggestCut),
     });
 
     const strongestGainer = [...shareRows].sort((a,b) => b.shareQoqPP - a.shareQoqPP)[0];
@@ -595,7 +611,8 @@ export async function onRequestGet({ request }) {
       kind: 'pricing_power',
       title: 'Strongest pricing power',
       provider: pricingPower.label, slug: pricingPower.slug,
-      detail: 'Price ' + pricingPower.priceReg + ' (' + pricingPower.priceQoqLabel + '), share ' + pricingPower.shareQoqLabel,
+      detail: 'Price ' + pricingPower.priceReg + ' (' + pricingPower.priceQoqLabel + '), share ' +
+        pricingPower.shareQoqLabel + matchedCaveat(pricingPower),
     });
 
     const weakConv = r

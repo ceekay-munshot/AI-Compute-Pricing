@@ -3885,9 +3885,9 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
          whenever the nearest earlier capture is further back than the seven
          days the card is headed with, so the key ships with the marker rather
          than leaving a number on screen with nothing to read it by. */}
-      {GPU_HISTORY_TREND_SKUS.some(sku=>signalBasis[sku]&&signalBasis[sku].windowStretched&&signalBasis[sku].label)&&(
+      {GPU_HISTORY_TREND_SKUS.some(sku=>signalBasis[sku]&&signalBasis[sku].label&&signalBasis[sku].spanDays!=null&&signalBasis[sku].spanDays!==7)&&(
         <div style={{fontSize:10,color:"#9ca3af",marginTop:-4,marginBottom:10,lineHeight:1.5}}>
-          A badge reading <b style={{color:"#6b7280",fontWeight:600}}>signal · Nd</b> was classified on a comparison spanning N days, not the 7 the card is headed with: the daily capture has a gap, so the nearest earlier day sits further back. The move itself is like-for-like — hover the badge for the dates and the measure.
+          A badge reading <b style={{color:"#6b7280",fontWeight:600}}>signal · Nd</b> was classified on a comparison spanning N days, not the 7 the card is headed with: the nearest earlier capture sits a different distance back. The move itself is like-for-like — hover the badge for the dates and the measure.
         </div>
       )}
 

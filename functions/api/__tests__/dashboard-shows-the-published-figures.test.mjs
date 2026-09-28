@@ -170,8 +170,17 @@ test('a card with no 7-day figure still carries its signal badge', () => {
 });
 
 test('the span suffix has a legend, and a signal off a stretched span is not labelled 7D', () => {
-  assert.match(GPU_HIST, /windowStretched&&signalBasis\[sku\]\.label/,
+  // The suffix is built for ANY span that is not 7 days, but this once
+  // required windowStretched — true only above ~10.5 days for a 7-day window.
+  // At a span of 8, 9 or 10 days the badge read "LOOSENING · 9D" with no
+  // legend anywhere on the page: a marker with no key, which is the one
+  // pairing rule the rest of this work keeps. The gate now matches the
+  // condition that draws the suffix.
+  assert.match(GPU_HIST, /signalBasis\[sku\]\.spanDays!=null&&signalBasis\[sku\]\.spanDays!==7/,
     'the legend for the "· Nd" suffix does not mount on the condition that draws it');
+  assert.doesNotMatch(GPU_HIST, /windowStretched&&signalBasis\[sku\]\.label/,
+    'the legend is gated on windowStretched again — spans of 8 to 10 days draw the ' +
+    'suffix with nothing on screen explaining it');
   assert.doesNotMatch(GPU_HIST, /Signal \(7D\):/,
     'the summary strip fixes the heading at 7D while a stretched comparator can now ' +
     'reach it — a 26-day move printed under "Signal (7D)" is a mislabel');
