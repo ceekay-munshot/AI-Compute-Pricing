@@ -156,6 +156,71 @@ test('the significance threshold is five missing days', () => {
   assert.equal(five.significantCaptureGaps.length, 1);
 });
 
+/* ── Growth across the 2026-07-28 change of measure ──────────────────── */
+
+// The legacy era-1 row: a vendor range, whose headline is the floor.
+const rangeRow = (sku, min, providers) => ({
+  gpuModel: sku,
+  minPricePerHour: min,
+  maxPricePerHour: 14.9,
+  medianPricePerHour: null,
+  providerCount: providers,
+  spreadAbsolute: +(14.9 - min).toFixed(4),
+  spreadMultiple: +(14.9 / min).toFixed(2),
+  priceMidpoint: +((14.9 + min) / 2).toFixed(4),
+});
+
+// The real shape of the change: 27 July days on the range, then the card
+// layout from the 28th with a lone price the parser of the day stranded in
+// maxPricePerHour.
+function straddleStore() {
+  const store = new Map();
+  const days = isoDays('2026-06-01', '2026-08-31');
+  for (const d of days) {
+    const gpu = d <= '2026-07-27'
+      ? { models: [rangeRow('Nvidia H100', d < '2026-07-01' ? 0.5 : 0.4027, 48)], coverage: 1 }
+      : { models: [row('Nvidia H100', d < '2026-08-01' ? 2.97 : 3.42, 48)], coverage: 1 };
+    // Era 2 published no median field at all — the price arrived as a lone
+    // figure the parser dropped into maxPricePerHour.
+    if (d > '2026-07-27') {
+      const m = gpu.models[0];
+      m.maxPricePerHour = m.medianPricePerHour;
+      m.medianPricePerHour = null;
+    }
+    store.set('day:' + d, { source: 'cron', backfill: false, gpu });
+  }
+  store.set('index:days', days.slice().reverse());
+  return store;
+}
+
+test('Jul->Aug growth is filled from the measure both months hold', async () => {
+  const fin = await call('?view=financial&window=400', straddleStore());
+  const months = Object.fromEntries(fin.monthly.series['Nvidia H100'].map(m => [m.period, m]));
+  // July is a floor month — 27 of its 31 days are range captures — and August
+  // is a median month. Their headlines are not comparable, but July's own four
+  // median days are, and that is the cell the reader was shown as blank.
+  assert.equal(months['2026-07'].priceBasis, 'floor');
+  assert.equal(months['2026-08'].priceBasis, 'median');
+  assert.equal(months['2026-07'].alternatePricePerHour, 2.97);
+  const mom = fin.monthly.mom['Nvidia H100']['2026-08'];
+  assert.ok(mom != null, 'the comparable figure exists and must be shown');
+  assert.equal(mom, 15.15);
+  assert.equal(fin.monthly.momReason['Nvidia H100']['2026-08'], undefined,
+    'a filled cell carries no "measure changed" refusal');
+});
+
+test('the filled cell says which days it rests on', async () => {
+  const fin = await call('?view=financial&window=400', straddleStore());
+  const note = fin.monthly.momNote['Nvidia H100']['2026-08'];
+  assert.match(note, /Like-for-like on the median/);
+  assert.match(note, /4 days on that measure/);
+  assert.match(note, /headlined as the floor/);
+  // Jun->Jul is a floor month against a floor month: an ordinary comparison
+  // that needs no caveat and must not be given one.
+  assert.equal(fin.monthly.mom['Nvidia H100']['2026-07'], -19.46);
+  assert.equal(fin.monthly.momNote['Nvidia H100']['2026-07'], undefined);
+});
+
 /* ── The 7-day comparator across the hole ────────────────────────────── */
 
 test('a 7-day comparator that lands in the gap is flagged, not passed off as 7 days', async () => {
@@ -165,10 +230,42 @@ test('a 7-day comparator that lands in the gap is flagged, not passed off as 7 d
   assert.equal(c.priorDate, '2026-08-21');
   assert.equal(c.actualSpanDays, 26);
   assert.equal(c.windowStretched, true);
-  // The provider move is real but spans 26 days. The page keys on the flag
-  // above to keep it out from under a "7D" heading; the signal already does.
+  // The provider move is real and spans 26 days. The page keys on the flag
+  // above to keep it out from under a "7D" heading.
   assert.equal(c.providerDelta, 1);
+});
+
+test('a stretched comparator is classified and its span named, not blanked', async () => {
+  // The delta is a real like-for-like move on the median basis; only its age
+  // is wrong. Calling it 'insufficient-data' threw the answer away and told
+  // the reader nothing. It is classified on what exists, labelled with the
+  // span it actually covers.
+  const j = await call('?window=60', liveShapedStore());
+  assert.equal(j.signals['Nvidia H100'], 'loosening', 'one provider joined, price flat');
+  const b = j.signalBasis['Nvidia H100'];
+  assert.equal(b.label, 'loosening · 26d');
+  assert.equal(b.spanDays, 26);
+  assert.equal(b.windowStretched, true);
+  assert.equal(b.priorDate, '2026-08-21');
+  assert.equal(b.latestDate, '2026-09-16');
+  assert.match(b.reason, /26 days, not the 7 asked for \(capture gap\)/);
+  assert.match(b.reason, /median/);
+});
+
+test("a signal is still refused when there is no comparable price, not merely an old one", async () => {
+  // The other half of the rule: with no price delta the only input left is
+  // vendor count, and one vendor leaving a listing page is not a market move.
+  const store = liveShapedStore();
+  for (const d of ['2026-09-15', '2026-09-16']) {
+    const rec = store.get('day:' + d);
+    rec.gpu.models[0].medianPricePerHour = null;
+    store.set('day:' + d, rec);
+  }
+  const j = await call('?window=60', store);
+  const b = j.signalBasis['Nvidia H100'];
   assert.equal(j.signals['Nvidia H100'], 'insufficient-data');
+  assert.match(b.reason, /no price on one side of the comparison/);
+  assert.equal(b.label, undefined, 'nothing to name a span over');
 });
 
 test('the daily price comparison uses the resolved median, not the empty floor field', async () => {

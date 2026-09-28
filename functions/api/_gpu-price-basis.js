@@ -194,9 +194,9 @@ export function periodHeadline(points) {
     headlinePricePerHour: round4(mean(byBasis[primary].values)),
     priceBasis: primary,
     basisDayCounts,
-    // A straddle period. Growth into and out of it is still refused across
-    // the change, but the period itself needs to say that its own average
-    // ignores some of its captured days.
+    // A straddle period. Its own average ignores some of its captured days,
+    // and — because it holds both measures for the same span — it is also the
+    // conversion that lets growth cross the change (periodGrowthDetail).
     mixedBasis: medDays > 0 && floorDays > 0,
     alternateBasis: altDays > 0 ? alternate : null,
     alternatePricePerHour: altDays > 0 ? round4(mean(byBasis[alternate].values)) : null,
@@ -219,28 +219,183 @@ export function pctChange(curr, prior) {
   return +(((curr - prior) / prior) * 100).toFixed(2);
 }
 
+/** A period's average on one named measure, headline or alternate. */
+function basisValue(rec, basis) {
+  if (!rec || !basis) return null;
+  if (rec.priceBasis === basis) return rec.headlinePricePerHour;
+  if (rec.alternateBasis === basis) return rec.alternatePricePerHour;
+  return null;
+}
+
+/** How many of a period's days sit on one named measure. */
+function basisDays(rec, basis) {
+  if (!rec || !basis) return null;
+  const counts = rec.basisDayCounts;
+  if (counts && isNum(counts[basis])) return counts[basis];
+  if (rec.priceBasis === basis && isNum(rec.basisDaysUsed)) return rec.basisDaysUsed;
+  return null;
+}
+
+function periodName(rec, fallback) {
+  return (rec && (rec.label || rec.period)) || fallback || 'the period';
+}
+
+function dayCountPhrase(n) {
+  if (!isNum(n)) return 'some of its days';
+  return n + ' day' + (n === 1 ? '' : 's');
+}
+
 /**
- * Growth between two periods, or null when the comparison is not one.
+ * Find a period between `prior` and `cur` that straddles a change of measure
+ * and therefore carries BOTH of their measures — the conversion that lets a
+ * floor period and a median period be compared without inventing anything.
  *
- * Refused when either side has no price, and — the point of this whole
- * module — when the two sides were measured differently. Reporting
- * $0.40 (floor) against $3.34 (median) as +731% would be a fabricated
- * market event, and it is precisely the number a customer would escalate.
+ * `records` is the SKU's own period list; period ids sort lexicographically
+ * within one kind ('2026-07' < '2026-08', '2026-Q2' < '2026-Q3').
  */
-export function periodGrowth(cur, prior) {
+export function basisLinkBetween(records, cur, prior) {
+  if (!cur || !prior || !cur.priceBasis || !prior.priceBasis) return null;
+  if (cur.priceBasis === prior.priceBasis) return null;
+  for (const r of records || []) {
+    if (!r || !r.mixedBasis || !r.period || !cur.period || !prior.period) continue;
+    if (!(r.period > prior.period && r.period < cur.period)) continue;
+    const carriesBoth =
+      (r.priceBasis === cur.priceBasis && r.alternateBasis === prior.priceBasis) ||
+      (r.priceBasis === prior.priceBasis && r.alternateBasis === cur.priceBasis);
+    if (carriesBoth && isNum(basisValue(r, cur.priceBasis)) && isNum(basisValue(r, prior.priceBasis))) return r;
+  }
+  return null;
+}
+
+/**
+ * Growth between two periods, with the linkage that made it possible.
+ *
+ * Refused when either side has no price. NOT refused merely because the two
+ * headlines are measured differently: a straddle period holds both measures
+ * for the same days, so a like-for-like figure usually exists and withholding
+ * it leaves the reader with a blank cell and no answer. Three shapes:
+ *
+ *   direct        both headlines already sit on the same measure.
+ *   shared-basis  exactly one side straddles the change, and its alternate
+ *                 average is on the other side's measure. July 2026 is the
+ *                 case: a floor month whose last 4 days were captured as
+ *                 medians at ~$3.06, which is what shows that August's $3.42
+ *                 median was not a five-fold jump.
+ *   chained       neither side straddles, but a period between them does, so
+ *                 the index runs prior → straddle on the old measure, then
+ *                 straddle → cur on the new one. Two legs, each like-for-like.
+ *
+ * What is never done is comparing $0.40 (floor) against $3.34 (median) as
+ * +731%. That remains refused, because nothing converts between them.
+ *
+ * The day counts ride along so the caller can label the figure honestly: a
+ * floor average resting on 27 July days set against a full quarter is not
+ * equal footing, and `note` says so in words.
+ */
+export function periodGrowthDetail(cur, prior, straddle) {
   if (!cur || !prior) return null;
   if (!cur.priceBasis || !prior.priceBasis) return null;
-  if (cur.priceBasis !== prior.priceBasis) return null;
-  return pctChange(cur.headlinePricePerHour, prior.headlinePricePerHour);
+
+  if (cur.priceBasis === prior.priceBasis) {
+    const pct = pctChange(cur.headlinePricePerHour, prior.headlinePricePerHour);
+    if (pct == null) return null;
+    return {
+      pct,
+      basis: cur.priceBasis,
+      link: 'direct',
+      curDays: basisDays(cur, cur.priceBasis),
+      priorDays: basisDays(prior, prior.priceBasis),
+      linkPeriod: null,
+      linkDays: null,
+      note: null,
+    };
+  }
+
+  // One side straddles the change and carries the other side's measure too.
+  // Exactly one — if both did, neither's alternate is the obvious meeting
+  // point and the chained form below is the honest description.
+  const curCarries = !!cur.mixedBasis && cur.alternateBasis === prior.priceBasis;
+  const priorCarries = !!prior.mixedBasis && prior.alternateBasis === cur.priceBasis;
+  if (curCarries !== priorCarries) {
+    const basis = curCarries ? prior.priceBasis : cur.priceBasis;
+    const pct = pctChange(basisValue(cur, basis), basisValue(prior, basis));
+    if (pct != null) {
+      const curDays = basisDays(cur, basis);
+      const priorDays = basisDays(prior, basis);
+      const mixed = curCarries ? cur : prior;
+      return {
+        pct,
+        basis,
+        link: 'shared-basis',
+        curDays,
+        priorDays,
+        linkPeriod: null,
+        linkDays: null,
+        note:
+          'Like-for-like on the ' + BASIS_LABEL[basis] + ': ' +
+          periodName(prior) + ' contributes ' + dayCountPhrase(priorDays) + ' on that measure, ' +
+          periodName(cur) + ' ' + dayCountPhrase(curDays) + '. ' +
+          periodName(mixed) + " is headlined as the " + BASIS_LABEL[mixed.priceBasis] +
+          ', so this is not a headline-to-headline move.',
+      };
+    }
+  }
+
+  // Neither side straddles; a period between them does.
+  if (straddle && straddle.mixedBasis) {
+    const legPrior = basisValue(straddle, prior.priceBasis);
+    const legCur = basisValue(straddle, cur.priceBasis);
+    if (
+      isNum(legPrior) && isNum(legCur) && legCur !== 0 &&
+      isNum(cur.headlinePricePerHour) && isNum(prior.headlinePricePerHour) &&
+      prior.headlinePricePerHour !== 0
+    ) {
+      const ratio = (legPrior / prior.headlinePricePerHour) * (cur.headlinePricePerHour / legCur);
+      const priorLegDays = basisDays(straddle, prior.priceBasis);
+      const curLegDays = basisDays(straddle, cur.priceBasis);
+      return {
+        pct: +((ratio - 1) * 100).toFixed(2),
+        basis: null,
+        link: 'chained',
+        curDays: basisDays(cur, cur.priceBasis),
+        priorDays: basisDays(prior, prior.priceBasis),
+        linkPeriod: straddle.period || null,
+        linkDays: { prior: priorLegDays, cur: curLegDays },
+        note:
+          'Chained through ' + periodName(straddle) + ', which was captured on both measures (' +
+          dayCountPhrase(priorLegDays) + ' on the ' + BASIS_SHORT[prior.priceBasis] + ', ' +
+          dayCountPhrase(curLegDays) + ' on the ' + BASIS_SHORT[cur.priceBasis] + '): ' +
+          periodName(prior) + ' to ' + periodName(straddle) + ' on the ' + BASIS_SHORT[prior.priceBasis] +
+          ', then ' + periodName(straddle) + ' to ' + periodName(cur) + ' on the ' + BASIS_SHORT[cur.priceBasis] +
+          '. Each leg is like-for-like; the result is an index, not one observed move.',
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Growth between two periods as a percentage, or null when no like-for-like
+ * figure can be computed. `straddle`, when supplied, is the period that
+ * carries both measures — see periodGrowthDetail for the three shapes.
+ */
+export function periodGrowth(cur, prior, straddle) {
+  const detail = periodGrowthDetail(cur, prior, straddle);
+  return detail ? detail.pct : null;
 }
 
 /** Why a growth cell is empty, in words, for the tooltip. */
-export function growthRefusalReason(cur, prior, priorLabel) {
+export function growthRefusalReason(cur, prior, priorLabel, straddle) {
   if (!cur || !cur.priceBasis) return 'No price captured for this period.';
   if (!prior || !prior.priceBasis) {
     return 'No price captured for ' + (priorLabel || 'the prior period') + ', so there is nothing to compare against.';
   }
   if (cur.priceBasis !== prior.priceBasis) {
+    // A measure change is only a refusal when nothing converts across it. If a
+    // straddle period carries both measures the cell holds a figure, and there
+    // is nothing to explain away.
+    if (periodGrowthDetail(cur, prior, straddle)) return null;
     return (
       'Not comparable: ' + (priorLabel || 'the prior period') + ' is measured as the ' +
       BASIS_LABEL[prior.priceBasis] + ', this period as the ' + BASIS_LABEL[cur.priceBasis] +

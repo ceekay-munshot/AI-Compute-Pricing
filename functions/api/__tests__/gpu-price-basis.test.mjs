@@ -22,6 +22,8 @@ import {
   periodHeadline,
   pricedDatesForBasis,
   periodGrowth,
+  periodGrowthDetail,
+  basisLinkBetween,
   growthRefusalReason,
   detectBasisTimeline,
   basisChangeForPeriods,
@@ -243,6 +245,124 @@ test('a missing prior period is explained differently from a measure change', ()
 
 test('growth against a zero prior is refused rather than returning Infinity', () => {
   assert.equal(periodGrowth(SEP, { priceBasis: BASIS_MEDIAN, headlinePricePerHour: 0 }), null);
+});
+
+/* ── Growth ACROSS the change, where a comparable figure exists ───────── */
+
+// July 2026 as captured: 27 floor days at $0.4027 and 4 median days at $2.97.
+// It is a floor month by the dominant-basis rule, and it is also the only
+// period that holds both measures for the same span — so it is what makes a
+// comparison across 2026-07-28 possible at all.
+const JUL_STRADDLE = {
+  period: '2026-07',
+  label: 'Jul-26',
+  priceBasis: BASIS_FLOOR,
+  headlinePricePerHour: 0.4027,
+  mixedBasis: true,
+  alternateBasis: BASIS_MEDIAN,
+  alternatePricePerHour: 2.97,
+  basisDayCounts: { median: 4, floor: 27 },
+  basisDaysUsed: 27,
+};
+const AUG_FULL = {
+  period: '2026-08',
+  label: 'Aug-26',
+  priceBasis: BASIS_MEDIAN,
+  headlinePricePerHour: 3.4186,
+  mixedBasis: false,
+  alternateBasis: null,
+  alternatePricePerHour: null,
+  basisDayCounts: { median: 31, floor: 0 },
+  basisDaysUsed: 31,
+};
+const JUN_FLOOR = {
+  period: '2026-06',
+  label: 'Jun-26',
+  priceBasis: BASIS_FLOOR,
+  headlinePricePerHour: 0.5,
+  mixedBasis: false,
+  alternateBasis: null,
+  alternatePricePerHour: null,
+  basisDayCounts: { median: 0, floor: 30 },
+  basisDaysUsed: 30,
+};
+const SEP_FULL = {
+  period: '2026-09',
+  label: 'Sep-26',
+  priceBasis: BASIS_MEDIAN,
+  headlinePricePerHour: 3.3445,
+  mixedBasis: false,
+  alternateBasis: null,
+  alternatePricePerHour: null,
+  basisDayCounts: { median: 30, floor: 0 },
+  basisDaysUsed: 30,
+};
+
+test('Jul->Aug is computed on the measure both months hold, not refused', () => {
+  // The number the module's own comment already knew: July's median days sat
+  // at $2.97, August's median month at $3.42. That is a 15% move, not the
+  // +749% the headlines would give and not the blank cell they used to.
+  const d = periodGrowthDetail(AUG_FULL, JUL_STRADDLE);
+  assert.equal(d.link, 'shared-basis');
+  assert.equal(d.basis, BASIS_MEDIAN);
+  assert.equal(d.pct, 15.1);
+  assert.equal(periodGrowth(AUG_FULL, JUL_STRADDLE), 15.1);
+});
+
+test('the linked figure says which days it rests on, and which month is off its headline', () => {
+  const d = periodGrowthDetail(AUG_FULL, JUL_STRADDLE);
+  assert.equal(d.priorDays, 4, "July's median-basis days");
+  assert.equal(d.curDays, 31);
+  assert.match(d.note, /Like-for-like on the median/);
+  assert.match(d.note, /Jul-26 contributes 4 days/);
+  assert.match(d.note, /Aug-26 31 days/);
+  assert.match(d.note, /Jul-26 is headlined as the floor/);
+  assert.match(d.note, /not a headline-to-headline move/);
+});
+
+test('a filled cell carries no refusal', () => {
+  assert.equal(growthRefusalReason(AUG_FULL, JUL_STRADDLE, 'Jul-26'), null);
+});
+
+test('two single-basis periods chain their index through the straddle', () => {
+  // Floor fell 20% Jun->Jul; the median rose 10% Jul->Sep. Neither leg mixes
+  // measures, and the product is the only honest answer to "Jun to Sep".
+  const records = [JUN_FLOOR, JUL_STRADDLE, AUG_FULL, SEP_FULL];
+  const link = basisLinkBetween(records, SEP_FULL, JUN_FLOOR);
+  assert.equal(link, JUL_STRADDLE);
+  const d = periodGrowthDetail(SEP_FULL, JUN_FLOOR, link);
+  assert.equal(d.link, 'chained');
+  assert.equal(d.linkPeriod, '2026-07');
+  assert.deepEqual(d.linkDays, { prior: 27, cur: 4 });
+  // (0.4027/0.50) * (3.3445/2.97) - 1
+  assert.equal(d.pct, -9.3);
+  assert.match(d.note, /Chained through Jul-26/);
+  assert.match(d.note, /27 days on the floor, 4 days on the median/);
+  assert.match(d.note, /an index, not one observed move/);
+});
+
+test('with no straddle to convert through, the refusal stands', () => {
+  // The same two measures, nothing between them that was captured both ways.
+  assert.equal(basisLinkBetween([JUN_FLOOR, SEP_FULL], SEP_FULL, JUN_FLOOR), null);
+  assert.equal(periodGrowth(SEP_FULL, JUN_FLOOR), null);
+  assert.match(growthRefusalReason(SEP_FULL, JUN_FLOOR, 'Jun-26'), /Not comparable/);
+});
+
+test('a straddle outside the two periods is not used as a link', () => {
+  // July sits before June->... only when it is BETWEEN them. Asking for
+  // Jul->Sep must not reach back through July itself.
+  assert.equal(basisLinkBetween([JUN_FLOOR, JUL_STRADDLE], JUL_STRADDLE, JUN_FLOOR), null);
+});
+
+test('a straddle that holds only one of the two measures links nothing', () => {
+  const halfStraddle = { ...JUL_STRADDLE, alternateBasis: null, alternatePricePerHour: null, mixedBasis: false };
+  assert.equal(basisLinkBetween([JUN_FLOOR, halfStraddle, SEP_FULL], SEP_FULL, JUN_FLOOR), null);
+  assert.equal(periodGrowth(SEP_FULL, JUN_FLOOR, halfStraddle), null);
+});
+
+test('the phantom jump stays refused — nothing converts a bare floor to a bare median', () => {
+  assert.equal(periodGrowth(AUG, JUL), null, 'JUL here carries no median days at all');
+  assert.equal(periodGrowthDetail(AUG, JUL), null);
 });
 
 /* ── Change detection ─────────────────────────────────────────────────── */
