@@ -121,17 +121,35 @@ function joinNames(names){
 // captured days it leaves out — with its trailing separator, for the caveat
 // strip. Shared by the partial and the full view so the two cannot describe
 // the same number differently.
+/* What a share on this page is measured over.
+   This was gated on basis.depth, which only ever exists on the DAILY measure —
+   the weekly provider series is provider-level and publishes depth null by
+   design. So the moment the share moved onto that series the note vanished
+   entirely, and the numbers changed meaning with nothing on screen saying so.
+   The sentence was hardcoded to the daily measure too, and would have been
+   describing a measure no longer in force. Both come from the server now, which
+   is the only thing that knows which measure it used. */
 function ShareBasisNote({ basis, days }){
-  if(!basis||!basis.depth) return null;
+  if(!basis||!basis.measureNote) return null;
   const x=basis.excludedDays||{};
   const parts=[
     x.backfill?x.backfill+" gap-fill "+(x.backfill===1?"copy":"copies")+" of a later capture":null,
     x.notModelRanking?x.notModelRanking+" whose list is not a model ranking (most rows name no model maker)":null,
+    x.appNamed?x.appNamed+" listing apps rather than models":null,
     x.incompleteRanking?x.incompleteRanking+" whose ranking has ranks missing":null,
+    x.variantFiltered?x.variantFiltered+" counting paid traffic only, which the earlier days do not":null,
   ].filter(Boolean);
+  const onWeekly=basis.measure==="provider-weekly";
   return(
     <>
-      <span><b style={{color:"#374151"}}>Share:</b> each counted day's share of the top {basis.depth} OpenRouter models' weekly tokens, averaged over every counted day of the quarter{days?" ("+days+")":""}; a provider outside the top {basis.depth} on a day counts as zero for it, and one outside it on every counted day has no share{parts.length?". Of all captured days, not counted: "+joinNames(parts):""}</span>
+      <span>
+        <b style={{color:"#374151"}}>Share:</b> {basis.measureNote}
+        {onWeekly
+          ? (basis.weeks?" Averaged over "+basis.weeks+" week"+(basis.weeks===1?"":"s")+" of the quarter.":null)
+          : (days?" ("+days+" counted days)":null)}
+        {basis.fallback?" The weekly series could not be read ("+(basis.fallbackReason||"reason unavailable")+"), so the daily captures stood in.":null}
+        {parts.length?" Of all captured days, not counted: "+joinNames(parts)+".":null}
+      </span>
       <span>·</span>
     </>
   );
