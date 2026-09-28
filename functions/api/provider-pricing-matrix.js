@@ -32,9 +32,11 @@
  *     the lineup costs. Anthropic's 2026-Q3 read "-10.4%" and was named the
  *     biggest price cut with not one of its models repriced: four models left
  *     the lineup, four joined, and the fourteen priced in both quarters did not
- *     move. Where too few models were priced in both to stand for the
- *     provider, the change is refused with a reason (matchedModelGrowth).
- *     Model-day view only. The usage-weighted view compares the levels it
+ *     move. Fewer than two models priced in both is the only refusal; under
+ *     half the lineup the change is still published, marked
+ *     <key>LowMatchedShare with its counts, so the screen can say "5 of 18
+ *     models like-for-like" instead of printing a dash over a figure that was
+ *     computed and correct (matchedModelGrowth). Model-day view only. The usage-weighted view compares the levels it
  *     shows, measured or estimated, so its QoQ/YoY reconcile with its Avg
  *     cells; a change resting on an estimate says so (<key>Estimated, <key>Note).
  *   - The source can change WHAT it reports: on 2026-07-10 its figure for 13
@@ -57,7 +59,11 @@
  *                               the price list says. Coverage is measured per
  *                               provider-quarter and cells that cannot clear
  *                               the gate are withheld with a stated reason —
- *                               see _usage-weights.js for the limits.
+ *                               see _usage-weights.js for the limits. Where
+ *                               the token series does not load at all there
+ *                               are no weights to apply anywhere, and every
+ *                               cell shows its list-price average instead,
+ *                               marked as unweighted rather than dashed.
  *   ?group=company  (default) — one column per provider (PROVIDERS)
  *   ?group=openness           — two columns, proprietary and open-weight,
  *                               pooling every model of PROVIDERS plus the open
@@ -394,14 +400,21 @@ function modelLevelsOn(models, basis) {
 // A like-for-like price change needs at least this many models priced in both
 // quarters. One model's change is that model's, not its provider's — the line
 // the usage weighting (MIN_WEIGHTED_MODELS) and the estimate pass in
-// buildMatrix draw for the same reason.
+// buildMatrix draw for the same reason. This is the ONLY hard refusal.
 const MIN_MATCHED_MODELS = 2;
-// ...and they must be at least this share of the models priced in the later
-// quarter, the lineup whose average the cell shows. Below half, the change
-// describes what is left of an older lineup, not the one on the page.
+// ...and at this share of the models priced in the later quarter — the lineup
+// whose average the cell shows — a like-for-like change speaks for the whole
+// lineup. Below half the change is still COMPUTED and published: it is a
+// correct statement about the models it names, and the dashboard has the data
+// to say which ones. It is marked <key>LowMatchedShare and carries
+// <key>MatchedModels / <key>LineupModels, so the screen can weaken how it
+// reads ("5 of 18 models like-for-like") instead of printing a dash the reader
+// cannot interpret. The counter-argument this replaces stands as the caveat
+// (thinMatchNote): a change on what is left of an older lineup is not the
+// lineup on the page, and must not be read as one.
 // Measured on 2026-09-21: Anthropic 2026-Q3 against 2025-Q3 matches 5 of 18
-// (13 models listed since, 7 retired) and is refused; against 2026-Q2 it
-// matches 14 of 18, and DeepSeek's YoY 8 of 15, and both are computed.
+// (13 models listed since, 7 retired); against 2026-Q2 it matches 14 of 18,
+// and DeepSeek's YoY 8 of 15.
 const MIN_MATCHED_SHARE = 0.5;
 
 /**
@@ -433,10 +446,10 @@ const MIN_MATCHED_SHARE = 0.5;
  * — so both quarters stand on one measure. A model that cannot be linked (first
  * listed after the change) has no earlier-measure figure and is left out.
  *
- * Returns { growth, matched, models, onlyNow, onlyThen, moved, unlinked } —
- * moved counts the matched models the change moved, unlinked those left out
- * for want of a link. growth is null when fewer than MIN_MATCHED_MODELS, or
- * fewer than MIN_MATCHED_SHARE of `models`, were matched.
+ * Returns { growth, matched, models, onlyNow, onlyThen, moved, unlinked, thin }
+ * — moved counts the matched models the change moved, unlinked those left out
+ * for want of a link, thin says the matched set is under MIN_MATCHED_SHARE of
+ * the lineup. growth is null ONLY when fewer than MIN_MATCHED_MODELS matched.
  */
 function matchedModelGrowth(cur, prior, { linked = false } = {}) {
   let sumNow = 0;
@@ -465,8 +478,11 @@ function matchedModelGrowth(cur, prior, { linked = false } = {}) {
     if (!cur.modelLevels.has(model)) onlyThen += 1;
   }
   const models = cur.modelLevels.size;
-  const out = { growth: null, matched, models, onlyNow, onlyThen, moved, unlinked };
-  if (matched < MIN_MATCHED_MODELS || matched < MIN_MATCHED_SHARE * models) return out;
+  const out = {
+    growth: null, matched, models, onlyNow, onlyThen, moved, unlinked,
+    thin: matched > 0 && matched < MIN_MATCHED_SHARE * models,
+  };
+  if (matched < MIN_MATCHED_MODELS) return out;
   // Linked levels all stand on the earlier measure; otherwise each quarter
   // keeps its own, and basisGrowth refuses a pair that differ.
   const g = basisGrowth(
@@ -481,6 +497,28 @@ function matchedModelGrowth(cur, prior, { linked = false } = {}) {
 
 function modelsPhrase(n) {
   return n + (n === 1 ? ' model' : ' models');
+}
+
+/**
+ * Said of a computed change that rests on under half the lineup. The figure is
+ * correct for the models it names and is published; this is the sentence that
+ * stops it being read as the whole lineup's move.
+ */
+function thinMatchNote(m, nowLabel, thenLabel) {
+  return ' Only ' + m.matched + ' of the ' + modelsPhrase(m.models) + ' priced in ' + nowLabel +
+    ' were also priced in ' + thenLabel + ' — under half the lineup, so this is what those ' +
+    m.matched + ' did, not a figure for the lineup as a whole.';
+}
+
+/**
+ * Said of a change in the usage-weighted view when no weights could be built
+ * at all: both quarters show their list-price average, so the change is the
+ * like-for-like list-price one — never the ratio of two lineup averages, which
+ * a model being listed or retired moves with no price changing.
+ */
+function unweightedChangeNote() {
+  return 'No usage weights could be built, so both quarters show their ' +
+    'list-price average and this is the like-for-like list-price change. ';
 }
 
 /** What a like-for-like change rests on, in words, for its tooltip. */
@@ -505,7 +543,8 @@ function likeForLikeNote(m, nowLabel, thenLabel, changeDate) {
     (outside.length
       ? ' ' + outside.join(' and ') + (m.onlyNow + m.onlyThen === 1 ? ' is' : ' are') +
         ' left out of the change; each quarter\'s average price still includes them.'
-      : (changeDate ? '' : ' No model was added or dropped between them.'));
+      : (changeDate ? '' : ' No model was added or dropped between them.')) +
+    (m.thin ? thinMatchNote(m, nowLabel, thenLabel) : '');
 }
 
 /**
@@ -519,7 +558,11 @@ function linkedWeightedNote(m, nowLabel, thenLabel, changeDate) {
     'so this is the like-for-like list-price change instead. ' + likeForLikeNote(m, nowLabel, thenLabel, changeDate);
 }
 
-/** Why a like-for-like change is blank, in words, for its tooltip. */
+/**
+ * Why a like-for-like change is blank, in words, for its tooltip. Reached only
+ * on the hard refusal — fewer than MIN_MATCHED_MODELS priced in both quarters
+ * — since a thin-but-computable match is published with a caveat instead.
+ */
 function tooFewMatchedReason(m, nowLabel, thenLabel) {
   const lead = 'A price change is measured on the models priced in both quarters';
   if (m.matched === 0) {
@@ -531,10 +574,9 @@ function tooFewMatchedReason(m, nowLabel, thenLabel) {
     : 'only ' + m.matched + ' of the ' + m.models + ' models';
   return 'Not computed: ' + who + ' priced in ' + nowLabel + (m.matched === 1 ? ' was' : ' were') +
     ' also priced in ' + thenLabel + '. ' + lead +
-    (m.matched < MIN_MATCHED_MODELS
-      ? ', and one model\'s change is not the provider\'s.'
-      : ', and fewer than half of this lineup were, so it would not stand for the provider.' +
-        ' Comparing the two quarters\' averages instead would measure models being listed and retired, not prices moving.');
+    ', and one model\'s change is not the provider\'s.' +
+    ' Comparing the two quarters\' averages instead would measure models being' +
+    ' listed and retired, not prices moving.';
 }
 
 /**
@@ -731,6 +773,17 @@ function buildMatrix(levelsBySlug, weighting, events, columns = PROVIDERS) {
     const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
     allMeasured.sort((a, b) => a - b);
     const peer = allMeasured.length ? allMeasured[Math.floor(allMeasured.length / 2)] : null;
+    // When the token series itself does not load, EVERY cell is gated
+    // 'series-unavailable' with a null provisional, so measured, provisional
+    // and peer are all empty and not one cell could be estimated: the whole
+    // weighted matrix came back 40 grey dashes. No peer ratio is invented for
+    // them — there is no measured cell anywhere to derive one from, and that
+    // guess is exactly what this module refuses. What every one of those cells
+    // does have is its own list price on the same row (equalAvg), which is a
+    // correct figure. It is shown as itself: a ratio of 1.00 BY DECLARATION,
+    // not derived from anything, marked 'list-price' and carrying the words
+    // the screen prints beside it.
+    const LIST_PRICE_MARKER = 'list price \u00b7 no usage weights';
     for (const row of rows) {
       for (const c of row.cells) {
         if (c.avg !== null || !(c.equalAvg > 0)) continue;
@@ -740,6 +793,7 @@ function buildMatrix(levelsBySlug, weighting, events, columns = PROVIDERS) {
         if (own && own.length) { ratio = mean(own); basis = 'measured-ratio'; }
         else if (prov && prov.length) { ratio = mean(prov); basis = 'provisional-ratio'; }
         else if (peer) { ratio = peer; basis = 'peer-ratio'; }
+        else if (c.gate === 'series-unavailable') { ratio = 1; basis = 'list-price'; }
         if (!ratio) continue;
         const est = exactEqual.get(c) * ratio;
         exact.set(c, est);
@@ -747,6 +801,13 @@ function buildMatrix(levelsBySlug, weighting, events, columns = PROVIDERS) {
         c.estimateAvgLabel = formatPrice(est);
         c.estimateBasis = basis;
         c.estimateRatio = round3(ratio);
+        if (basis === 'list-price') {
+          // Not an estimate of anything: the list price, said to be the list
+          // price. estimateDeclared distinguishes it from the three ratios
+          // above, which are inferred.
+          c.estimateDeclared = true;
+          c.estimateMarker = LIST_PRICE_MARKER;
+        }
       }
     }
   }
@@ -756,8 +817,12 @@ function buildMatrix(levelsBySlug, weighting, events, columns = PROVIDERS) {
   // In the model-day view the change is LIKE-FOR-LIKE (matchedModelGrowth):
   // measured on the models priced in both quarters, never on the two lineup
   // averages, so a model listed or retired between them is not a price move.
-  // The level stays the whole lineup's average. Where too few models were
-  // priced in both, the change is refused with a reason instead.
+  // The level stays the whole lineup's average. Where fewer than two models
+  // were priced in both there is nothing to compare and the change is refused
+  // with a reason; where they are fewer than half the lineup the change is
+  // still computed and published, marked <key>LowMatchedShare with the counts,
+  // because a correct statement about five models is worth more to the reader
+  // than a dash they cannot interpret.
   //
   // The usage-weighted view compares the levels it SHOWS: what the market paid
   // does move when it buys a different mix. Where a quarter's measured value
@@ -766,7 +831,10 @@ function buildMatrix(levelsBySlug, weighting, events, columns = PROVIDERS) {
   // every cell filled (29 of 40 cells on 2026-09-24), and the two views of one
   // series disagreed. A change resting on an estimate says so
   // (<key>Estimated, <key>Note), with the like-for-like list-price change
-  // beside it as a cross-check.
+  // beside it as a cross-check. Where no weights exist at all and both cells
+  // fall back to their list-price average, the change is the LIKE-FOR-LIKE
+  // list-price one (<key>ListPrice): dividing two lineup averages there would
+  // reintroduce the mix artefact this whole pass exists to remove.
   //
   // Whether two quarters stand on one measure is decided in ONE place,
   // _model-price-basis.js: a quarter is on the changed measure if ANY model in
@@ -786,7 +854,13 @@ function buildMatrix(levelsBySlug, weighting, events, columns = PROVIDERS) {
     if (!c) return null;
     if (c.avg !== null) return { value: exact.get(c) ?? c.avg, basis: c.basis, estimated: false };
     if (weighting && c.estimateAvg != null) {
-      return { value: exact.get(c) ?? c.estimateAvg, basis: c.basis, estimated: true, ratio: c.estimateRatio };
+      return {
+        value: exact.get(c) ?? c.estimateAvg, basis: c.basis, estimated: true,
+        ratio: c.estimateRatio,
+        // This cell shows its list-price average unweighted (no weights exist
+        // anywhere), which changes what a comparison of two of them means.
+        listPrice: c.estimateBasis === 'list-price',
+      };
     }
     return null;
   };
@@ -798,58 +872,85 @@ function buildMatrix(levelsBySlug, weighting, events, columns = PROVIDERS) {
       // For each of qoq (the prior quarter) and yoy (the same quarter a year
       // earlier) this writes <key> and <key>Label, and where they apply
       // <key>MeasureChanged + <key>Reason (a change of measure),
-      // <key>MatchedModels (models priced in both quarters),
-      // <key>TooFewMatched + <key>Reason (refused: too few of them),
+      // <key>MatchedModels / <key>LineupModels (models priced in both
+      // quarters, out of the quarter's lineup),
+      // <key>LowMatchedShare (computed, but on under half the lineup),
+      // <key>TooFewMatched + <key>Reason (refused: fewer than two of them),
+      // <key>Linked (taken across a change of measure at its exact factor),
       // <key>Estimated (usage-weighted: a side is an estimate),
+      // <key>ListPrice (usage-weighted: no weights exist, so both sides are
+      // list-price averages and this is their like-for-like change),
       // <key>Reason alone (nothing to compare against), or
       // <key>Note (what a figure rests on).
       for (const [key, then] of [['qoq', priorQuarter(row.quarter)], ['yoy', yearAgoQuarter(row.quarter)]]) {
         const thenLabel = periodLabel(then);
         const prior = level(rowByQuarter.get(then)?.cells?.[idx]);
         let growth = basisGrowth(cur, prior);
+        // What a matched set was, published beside every figure taken from one
+        // — and beside every refusal for want of one, so the screen can say
+        // "5 of 18" either way.
+        const counts = (m) => {
+          cell[key + 'MatchedModels'] = m.matched;
+          cell[key + 'LineupModels'] = m.models;
+          if (m.thin) cell[key + 'LowMatchedShare'] = true;
+        };
+        // Both cells show an unweighted list-price average (no weights exist
+        // anywhere), so the comparison is a list-price one; one of the two,
+        // and they are not the same measurement at all.
+        const bothList = !!(cur && cur.listPrice && prior && prior.listPrice);
+        const oneList = !!(cur && cur.listPrice) !== !!(prior && prior.listPrice);
         if (cur && !prior) {
           cell[key + 'Reason'] = noComparatorReason(then, earliestQuarter);
         } else if (isMeasureChange(cur, prior)) {
           const m = matchedModelGrowth(stats.get(row.quarter), stats.get(then), { linked: true });
           const changeDate = changeDateOf(cur, prior);
+          counts(m);
           if (m.growth !== null) {
             growth = m.growth;
-            cell[key + 'MatchedModels'] = m.matched;
             cell[key + 'Linked'] = true;
-            cell[key + 'Note'] = weighting
+            cell[key + 'Note'] = weighting && !bothList
               ? linkedWeightedNote(m, nowLabel, thenLabel, changeDate)
               : likeForLikeNote(m, nowLabel, thenLabel, changeDate);
-          } else if (m.unlinked && m.matched + m.unlinked >= MIN_MATCHED_MODELS &&
-                     m.matched + m.unlinked >= MIN_MATCHED_SHARE * m.models) {
+          } else if (m.unlinked && m.matched + m.unlinked >= MIN_MATCHED_MODELS) {
             // Refused BECAUSE of the change: enough models were priced in both
             // quarters, but too many of them cannot be linked across it.
-            cell[key + 'MatchedModels'] = m.matched;
             cell[key + 'MeasureChanged'] = true;
             cell[key + 'Reason'] = measureChangeReason(cur, prior, thenLabel, events) +
               ' Linking it like-for-like was tried: only ' + modelsPhrase(m.matched) +
               ' priced in both quarters could be linked, against ' + m.models + ' priced in ' + nowLabel +
-              ' — too few to stand for the lineup.';
+              ' — too few to compare.';
           } else {
-            // Refused for the ordinary reason — too few models priced in both
-            // quarters — which linking cannot change. Said as such, not as a
-            // change of measure.
-            cell[key + 'MatchedModels'] = m.matched;
+            // Refused for the ordinary reason — fewer than two models priced
+            // in both quarters — which linking cannot change. Said as such,
+            // not as a change of measure.
             cell[key + 'TooFewMatched'] = true;
             cell[key + 'Reason'] = tooFewMatchedReason(m, nowLabel, thenLabel);
           }
-        } else if (growth !== null && !weighting) {
+        } else if (growth !== null && oneList) {
+          // One side is a declared list-price average and the other a real
+          // usage-weighted level. Their ratio is the weighting, not a price
+          // change, so it is not published. (The route builds weights for the
+          // whole matrix or for none of it, so this cannot arise there.)
+          growth = null;
+          cell[key + 'Reason'] = 'Not computed: ' + (cur.listPrice ? nowLabel : thenLabel) +
+            ' has no usage weights and shows its list-price average instead, so ' +
+            'the two quarters are not the same measurement.';
+        } else if (growth !== null && (!weighting || bothList)) {
           const m = matchedModelGrowth(stats.get(row.quarter), stats.get(then));
           growth = m.growth;
-          cell[key + 'MatchedModels'] = m.matched;
+          counts(m);
           if (growth === null) {
             cell[key + 'TooFewMatched'] = true;
             cell[key + 'Reason'] = tooFewMatchedReason(m, nowLabel, thenLabel);
           } else {
-            cell[key + 'Note'] = likeForLikeNote(m, nowLabel, thenLabel);
+            if (bothList) cell[key + 'ListPrice'] = true;
+            cell[key + 'Note'] = (bothList ? unweightedChangeNote() : '') +
+              likeForLikeNote(m, nowLabel, thenLabel);
           }
         } else if (growth !== null && (cur.estimated || prior.estimated)) {
           cell[key + 'Estimated'] = true;
           const m = matchedModelGrowth(stats.get(row.quarter), stats.get(then));
+          counts(m);
           cell[key + 'Note'] = estimatedChangeNote(cur, prior, nowLabel, thenLabel, m);
         }
         cell[key] = growth;
@@ -1253,6 +1354,15 @@ async function buildProviderMatrix(request, metric, weight, group = 'company') {
     weightMeta = {
       source: 'weights from openrouter.ai/rankings weekly token series; provider totals ' +
         'read live from the market-share dataset, merged over the captured history',
+      // No weights could be built for ANY provider-quarter, so every cell
+      // shows its list-price average, marked (estimateBasis 'list-price').
+      // The screen says so once, over the table, rather than forty times.
+      unweightedFallback: !seriesAvailable,
+      unweightedFallbackReason: seriesAvailable ? null
+        : 'The OpenRouter weekly token series could not be loaded, so no usage ' +
+          'weights exist for any provider. Every cell shows the same list-price ' +
+          'average as the model-day view, unweighted and marked as such; QoQ and ' +
+          'YoY are the like-for-like list-price changes.',
       modelSeriesAvailable: !!modelSeries,
       providerSeriesAvailable: !!providerSeries,
       providerSeriesLive: liveOk,
@@ -1348,8 +1458,11 @@ async function buildProviderMatrix(request, metric, weight, group = 'company') {
         'Where a ratio of usage-weighted to list price exists to scale from, the ' +
         'cell carries an estimate instead: the quarter\'s list-price average ' +
         'times that ratio, reported with its basis and the reason the ' +
-        'measurement was withheld. QoQ/YoY compare the figures shown, measured ' +
-        'or estimated; a change resting on an estimate says so. Where the source ' +
+        'measurement was withheld. Where the token series does not load at all ' +
+        'there is no ratio anywhere to scale from, and each cell shows its own ' +
+        'list-price average unweighted, marked, with QoQ/YoY taken like-for-like ' +
+        'from the models priced in both quarters. QoQ/YoY compare the figures ' +
+        'shown, measured or estimated; a change resting on an estimate says so. Where the source ' +
         'changed what it reports, each quarter averages one measure only, and ' +
         'QoQ/YoY across the change are the like-for-like list-price change, each ' +
         'model the change moved linked at its exact factor.'
@@ -1360,8 +1473,8 @@ async function buildProviderMatrix(request, metric, weight, group = 'company') {
         'like-for-like: they compare only the models priced in both quarters, ' +
         'each at its own average price, so a model being listed or retired is ' +
         'not read as a price move; they are not computed where fewer than two ' +
-        'models, or fewer than half of the quarter\'s models, were priced in ' +
-        'both. Where the source changed what it reports, each quarter averages ' +
+        'models were priced in both, and are marked where those models are ' +
+        'under half the quarter\'s lineup. Where the source changed what it reports, each quarter averages ' +
         'one measure only, and QoQ/YoY across the change are linked: each model ' +
         'the change moved is compared at its reported price times the change\'s ' +
         'exact factor.',

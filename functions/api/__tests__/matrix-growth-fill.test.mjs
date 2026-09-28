@@ -156,7 +156,7 @@ test('a change across the source\'s change of measure is linked, and a real cut 
   assert.ok(q3.google.avg < cellsOf(d, '2026-Q2').google.avg * 0.6);
 });
 
-test('a model first listed after the change cannot be linked, and too few linkable models refuse', async () => {
+test('a model first listed after the change cannot be linked, and too few linkable models say so', async () => {
   const { body: d } = await matrix('metric=input', {
     google: [
       // Five halve (the change), and three are listed after it: Q3's lineup is
@@ -165,20 +165,42 @@ test('a model first listed after the change cannot be linked, and too few linkab
       ...['n1', 'n2', 'n3'].map(m => hist('gemini-' + m, [['2026-07-15', E, 3e-7]])).flat(),
     ],
     openai: [
-      // Five halve, and seven are listed after it: 5 of 12 priced in both —
-      // too few whatever the measure, so refused as a lineup change.
+      // Five halve, and seven are listed after it: 5 of 12 priced in both.
+      // Under half the lineup, and linkable — so the change is published for
+      // those five and marked, not dropped.
       ...['a', 'b', 'c', 'd', 'e'].map((m, i) => hist('gpt-' + m, [[S, '2026-07-09', (i + 1) * 4e-7], ['2026-07-10', E, (i + 1) * 2e-7]])).flat(),
       ...['n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7'].map(m => hist('gpt-' + m, [['2026-07-15', E, 1e-6]])).flat(),
+    ],
+    anthropic: [
+      // One model priced in both quarters: below the hard floor of two, so
+      // refused whatever the measure. One model's change is not a provider's.
+      ...hist('claude-a', [[S, '2026-07-09', 4e-7], ['2026-07-10', E, 2e-7]]),
+      ...['n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7'].map(m => hist('claude-' + m, [['2026-07-15', E, 1e-6]])).flat(),
     ],
   });
   const q3 = cellsOf(d, '2026-Q3');
   assert.equal(q3.google.qoq, 0);
   assert.equal(q3.google.qoqMatchedModels, 5);
+  assert.equal(q3.google.qoqLineupModels, 8);
+  assert.equal(q3.google.qoqLowMatchedShare, undefined, '5 of 8 is most of the lineup');
   assert.match(q3.google.qoqNote, /3 models priced only in Q3 2026/);
-  assert.equal(q3.openai.qoq, null);
-  assert.equal(q3.openai.qoqMeasureChanged, undefined, 'the lineup turned over — not a change of measure');
-  assert.equal(q3.openai.qoqTooFewMatched, true);
-  assert.match(q3.openai.qoqReason, /only 5 of the 12 models priced in Q3 2026 were also priced in Q2 2026/);
+  // Linked at the change's exact factor, so the five did not move — a correct
+  // figure for them, published with the count that qualifies it.
+  assert.equal(q3.openai.qoq, 0);
+  assert.equal(q3.openai.qoqLinked, true);
+  assert.equal(q3.openai.qoqMatchedModels, 5);
+  assert.equal(q3.openai.qoqLineupModels, 12);
+  assert.equal(q3.openai.qoqLowMatchedShare, true);
+  assert.equal(q3.openai.qoqTooFewMatched, undefined);
+  assert.equal(q3.openai.qoqReason, undefined);
+  assert.match(q3.openai.qoqNote, /Only 5 of the 12 models priced in Q3 2026 were also priced in Q2 2026 — under half the lineup/);
+  // The hard floor still refuses, and still says why.
+  assert.equal(q3.anthropic.qoq, null);
+  assert.equal(q3.anthropic.qoqTooFewMatched, true);
+  assert.equal(q3.anthropic.qoqMatchedModels, 1);
+  assert.equal(q3.anthropic.qoqLineupModels, 8);
+  assert.match(q3.anthropic.qoqReason, /only 1 of the 8 models priced in Q3 2026 was also priced in Q2 2026/);
+  assert.match(q3.anthropic.qoqReason, /one model's change is not the provider's/);
 });
 
 test('a change with nothing to compare against says so', async () => {
@@ -269,4 +291,63 @@ test('usage-weighted QoQ/YoY are taken from the level shown, estimates included'
   assert.equal(q2.anthropic.qoq, null);
   assert.equal(q2.anthropic.qoqReason,
     'Not computed: there is no Q1 2026 to compare against — the source\'s price history starts in Q2 2026.');
+});
+
+/* ── No usage series at all: list prices, marked, instead of 40 dashes ── */
+
+test('with no usage series every weighted cell shows its list price, marked and compared like-for-like', async () => {
+  // Nothing but pricepertoken answers, so neither the model nor the provider
+  // token series loads: not one cell can be weighted, and none can be
+  // estimated either — there is no measured cell anywhere to take a ratio
+  // from. The whole matrix used to come back as grey dashes although every
+  // list price sat on the same cell. It now shows that list price as itself.
+  const { body: d } = await matrix('metric=input&weight=usage', {
+    anthropic: [
+      ...hist('claude-a', [[S, E, 3e-6]]),
+      ...hist('claude-b', [[S, Q2_END, 1.5e-5], [Q3_START, E, 1.2e-5]]),
+      ...hist('claude-old', [[S, Q2_END, 7.5e-5]]),
+      ...hist('claude-new', [[Q3_START, E, 1e-6]]),
+    ],
+  });
+  assert.equal(d.weighting.modelSeriesAvailable, false);
+  assert.equal(d.weighting.unweightedFallback, true);
+  assert.match(d.weighting.unweightedFallbackReason, /no usage weights exist for any provider/);
+
+  const q3 = cellsOf(d, '2026-Q3'), q2 = cellsOf(d, '2026-Q2');
+  const a3 = q3.anthropic;
+  // The measurement is still withheld, and still says why...
+  assert.equal(a3.avg, null);
+  assert.equal(a3.gate, 'series-unavailable');
+  assert.match(a3.gateReason, /could not be loaded/);
+  // ...but the cell is not empty: it is the list price, declared as such.
+  assert.equal(a3.equalAvg, round3((3 + 12 + 1) / 3));
+  assert.equal(a3.estimateAvg, a3.equalAvg);
+  assert.equal(a3.estimateAvgLabel, a3.equalAvgLabel);
+  assert.equal(a3.estimateBasis, 'list-price');
+  assert.equal(a3.estimateRatio, 1, 'declared, not derived from any measured cell');
+  assert.equal(a3.estimateDeclared, true);
+  assert.equal(a3.estimateMarker, 'list price · no usage weights');
+  // No cell anywhere is left blank while its list price exists.
+  for (const row of d.quarters) {
+    for (const c of row.cells) {
+      if (!(c.equalAvg > 0)) continue;
+      assert.equal(c.estimateBasis, 'list-price', row.quarter + '/' + c.slug);
+      assert.ok(c.estimateAvgLabel, row.quarter + '/' + c.slug + ' has no figure to show');
+    }
+  }
+
+  // Both quarters show a list-price average, so the change is the
+  // like-for-like list-price one — claude-a flat and claude-b $15 -> $12 —
+  // and NOT the ratio of the two lineup averages, which the retired $75 model
+  // alone would drive to about -83%.
+  assert.equal(a3.qoq, round3(15 / 18 - 1));
+  assert.equal(a3.qoqLabel, '-16.7%');
+  assert.equal(a3.qoqListPrice, true);
+  assert.equal(a3.qoqMatchedModels, 2);
+  assert.equal(a3.qoqLineupModels, 3);
+  assert.equal(a3.qoqEstimated, undefined, 'nothing here was scaled by a ratio');
+  assert.match(a3.qoqNote, /^No usage weights could be built, so both quarters show their list-price average/);
+  assert.match(a3.qoqNote, /Like-for-like: the 2 models priced in both Q2 2026 and Q3 2026/);
+  assert.ok(a3.qoq > -0.5, 'the lineup-average ratio was about -83%');
+  assert.equal(q2.anthropic.estimateBasis, 'list-price');
 });
