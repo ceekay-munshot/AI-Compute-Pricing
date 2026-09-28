@@ -155,6 +155,36 @@ function ShareBasisNote({ basis, days }){
   );
 }
 
+/* What the share figures on this block MEAN, said above them rather than only
+   in the caveat strip at the foot.
+   The measure moved from the top-N daily captures to OpenRouter's weekly
+   provider series: all traffic including free tiers, and a share of the whole
+   marketplace rather than of the top N. Every level on screen is lower than it
+   was and they no longer sum to 100%. A reader can see a break in a series; a
+   reader cannot see a redefinition, so it is named where the numbers are.
+   Shared by the partial and the full view so neither can describe the same
+   number differently. */
+function ShareMeasureStrip({ basis }){
+  if(!basis||!basis.measureLabel) return null;
+  const onWeekly=basis.measure==="provider-weekly";
+  return(
+    <div style={{fontSize:11,color:"#6b7280",marginTop:-4,marginBottom:8,lineHeight:1.5}} title={basis.measureNote||undefined}>
+      <b style={{color:"#374151"}}>Share measured as:</b> {basis.measureLabel}
+      {onWeekly&&" — a change of measure from the top-N daily captures this block read before. A level here is a share of the whole marketplace, so it is lower than the top-N figure was, and the levels do not sum to 100%."}
+      {basis.fallback&&" The weekly series could not be read on this load, so the daily captures stood in."}
+    </div>
+  );
+}
+
+// How a level on this block should be read aloud, for the callout chips, in
+// the fewest words that still name the measure. The full sentence is in
+// ShareMeasureStrip above and ShareBasisNote below.
+function shareOfPhrase(basis){
+  if(basis&&basis.measure==="provider-weekly") return "of all OpenRouter tokens, free included";
+  if(basis&&basis.depth) return "of the top "+basis.depth+" models' tokens";
+  return "of ranked tokens";
+}
+
 function PricingSharePartialView({ header, quarter, basis }){
   const rows=(quarter.rows||[]).filter(r=>typeof r.priceQoq==="number"&&typeof r.shareAvg==="number");
   // Providers whose price change the matrix refused, for EITHER reason: the
@@ -217,6 +247,7 @@ function PricingSharePartialView({ header, quarter, basis }){
         {quarter.partial&&<span style={{marginLeft:5,fontSize:9,background:"#ecfeff",color:"#0e7490",padding:"1px 5px",borderRadius:3,fontWeight:600}}>QTD</span>}
         <span style={{color:"#9ca3af"}}> · {tableRows.length} providers · partial view</span>
       </div>
+      <ShareMeasureStrip basis={basis}/>
       {/* Explanation banner */}
       <div style={{background:"#fffbeb",border:"0.5px solid #fde68a",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:11,color:"#78350f",lineHeight:1.45}}>
         <b>Share QoQ pending.</b> No quarter yet pairs a computed price change with a share change against the quarter before, so the full read-through can't be drawn. Showing Price QoQ vs <i>current</i> share % instead — the full view returns automatically once one does.
@@ -252,7 +283,7 @@ function PricingSharePartialView({ header, quarter, basis }){
         {topShare&&<div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"8px 10px"}}>
           <div style={{fontSize:9,textTransform:"uppercase",letterSpacing:".07em",fontWeight:700,color:"#7c3aed"}}>Largest share holder</div>
           <div style={{fontSize:13,fontWeight:700,color:"#111827",marginTop:2}}>{topShare.label}</div>
-          <div style={{fontSize:10,color:"#6b7280",marginTop:2,lineHeight:1.4}}>{topShare.shareAvgLabel} of {basis&&basis.depth?"the top "+basis.depth+" models'":"ranked"} tokens · price {topShare.priceQoqLabel}</div>
+          <div style={{fontSize:10,color:"#6b7280",marginTop:2,lineHeight:1.4}} title={(basis&&basis.measureNote)||undefined}>{topShare.shareAvgLabel} {shareOfPhrase(basis)} · price {topShare.priceQoqLabel}</div>
         </div>}
       </div>
       <div style={{display:"grid",gridTemplateColumns:"minmax(360px,1fr) minmax(420px,2fr)",gap:10}}>
@@ -300,7 +331,8 @@ function PricingSharePartialView({ header, quarter, basis }){
             <thead>
               <tr>
                 {["Provider","Avg Price /1M","Price QoQ","Current Share"].map(h=>(
-                  <th key={h} style={{...S.lbl,textAlign:"left",padding:"8px 10px",borderBottom:"1px solid #f3f4f6",background:"#fafafa"}}>{h}</th>
+                  <th key={h} title={h==="Current Share"?((basis&&basis.measureNote)||undefined):undefined}
+                      style={{...S.lbl,textAlign:"left",padding:"8px 10px",borderBottom:"1px solid #f3f4f6",background:"#fafafa"}}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -450,7 +482,17 @@ function PricingShareSignalBlock(){
   const noPriorShare=latest.rows.filter(r=>typeof r.shareQoqPP!=="number");
   const noShareNow=latest.notInTopN||[];
   const depth=d.shareBasis&&d.shareBasis.depth;
+  const onWeekly=d.shareBasis&&d.shareBasis.measure==="provider-weekly";
   const topN=depth?"the top "+depth:"the ranking";
+  // Why a provider has no share in a quarter, on the measure actually in
+  // force. The weekly provider series has no top-N and no counted days: a
+  // provider it does not name in every week of the quarter sits inside its
+  // "others" remainder, so its share there is unknown rather than zero.
+  // "No model in the top N on any counted day" would describe a measure the
+  // block is no longer reading.
+  const absentFrom=(q,key)=>onWeekly
+    ?"the weekly provider series does not name it in every week of "+key+", so its share there sits inside the series' “others” remainder and is unknown, not zero"
+    :"no model in "+topN+" on any of the "+(q&&q.shareDays?q.shareDays+" ":"")+"counted days of "+key;
   const priorQ=(d.quarters||[]).find(q=>q.quarter===d.priorComparable);
   let xMax=Math.max(5,...rows.map(r=>Math.abs(r.priceQoq*100)))*1.15;
   let yMax=Math.max(1,...rows.map(r=>Math.abs(r.shareQoqPP)))*1.3;
@@ -502,6 +544,7 @@ function PricingShareSignalBlock(){
         {latest.partial&&<span style={{marginLeft:5,fontSize:9,background:"#ecfeff",color:"#0e7490",padding:"1px 5px",borderRadius:3,fontWeight:600}}>QTD</span>}
         <span style={{color:"#9ca3af"}}> vs {d.priorComparable} · {rows.length} providers observed in both dimensions</span>
       </div>
+      <ShareMeasureStrip basis={d.shareBasis}/>
       {refusedRows.length>0&&(
         <div style={{fontSize:11,color:"#92400e",marginTop:-4,marginBottom:8,lineHeight:1.5}}
              title={d.measureBreaks?.summary?d.measureBreaks.summary.headline+" "+d.measureBreaks.summary.detail:undefined}>
@@ -512,8 +555,8 @@ function PricingShareSignalBlock(){
       )}
       {(noPriorShare.length>0||noShareNow.length>0)&&(
         <div style={{fontSize:11,color:"#6b7280",marginTop:-4,marginBottom:8,lineHeight:1.5}}>
-          {noPriorShare.length>0&&<>{joinNames(noPriorShare.map(r=>r.label))} {noPriorShare.length===1?"has":"have"} no share change: no model in {topN} on any of the {priorQ&&priorQ.shareDays?priorQ.shareDays+" ":""}counted days of {d.priorComparable}. </>}
-          {noShareNow.length>0&&<>{joinNames(noShareNow.map(r=>r.label))} had no model in {topN} on any of the {latest.shareDays?latest.shareDays+" ":""}counted days of {d.latestComparable}, so {noShareNow.length===1?"it has":"they have"} no share to compare.</>}
+          {noPriorShare.length>0&&<>{joinNames(noPriorShare.map(r=>r.label))} {noPriorShare.length===1?"has":"have"} no share change: {absentFrom(priorQ,d.priorComparable)}. </>}
+          {noShareNow.length>0&&<>{joinNames(noShareNow.map(r=>r.label))} {noShareNow.length===1?"has":"have"} no share to compare: {absentFrom(latest,d.latestComparable)}.</>}
         </div>
       )}
 
@@ -588,8 +631,12 @@ function PricingShareSignalBlock(){
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
             <thead>
               <tr>
+                {/* The two share columns name their measure on hover: the
+                   figures under them count something different from what this
+                   table showed while it read the daily captures. */}
                 {["Provider","Avg Price /1M","Price QoQ","Share QoQ","Regime / Interpretation"].map(h=>(
-                  <th key={h} style={{...S.lbl,textAlign:"left",padding:"8px 10px",borderBottom:"1px solid #f3f4f6",background:"#fafafa"}}>{h}</th>
+                  <th key={h} title={h.startsWith("Share")?((d.shareBasis&&d.shareBasis.measureNote)||undefined):undefined}
+                      style={{...S.lbl,textAlign:"left",padding:"8px 10px",borderBottom:"1px solid #f3f4f6",background:"#fafafa"}}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -919,6 +966,19 @@ function ModelPricingHistoryBlock(){
         </div>
       )}
 
+      {/* Said once, over the table, rather than forty times inside it: the
+         weekly token series could not be read, so no usage weights exist for
+         any provider and every cell shows its own list-price average. This is
+         the legend for the "list price · no usage weights" marker each cell
+         carries, and it mounts under exactly the condition that draws it. */}
+      {weighted&&state.data?.weighting?.unweightedFallback&&(
+        <div role="note" style={{background:"#f9fafb",border:"0.5px solid #e5e7eb",borderRadius:6,padding:"8px 11px",marginBottom:8,fontSize:11,color:"#4b5563",lineHeight:1.55}}>
+          <b style={{fontWeight:700}}>Usage weighting unavailable on this load.</b>{" "}
+          {state.data.weighting.unweightedFallbackReason||"No usage weights could be built, so every cell shows its list-price average."}{" "}
+          Each cell is marked <b style={{fontWeight:600}}>list price · no usage weights</b>.
+        </div>
+      )}
+
       {/* Content */}
       {state.phase==="error"?(
         <div style={{background:"#fff",border:"0.5px dashed #fca5a5",borderRadius:10,padding:"20px 16px",textAlign:"center"}}>
@@ -979,11 +1039,23 @@ function ModelPricingHistoryBlock(){
                     // growth is the change of the level shown, so the sub-label is that
                     // level — the estimate where the measured value was withheld.
                     const matched=view==="qoq"?c.qoqMatchedModels:view==="yoy"?c.yoyMatchedModels:null;
+                    // The lineup the matched set is a slice of, published beside
+                    // every change AND every refusal, so the cell can say "5 of
+                    // 18" either way. thinMatch is the server's own mark: the
+                    // change is correct but rests on under half the lineup, so
+                    // it is shown in lighter type with what it rests on spelled
+                    // out beneath it, rather than refused into a dash the reader
+                    // cannot interpret.
+                    const lineup=view==="qoq"?c.qoqLineupModels:view==="yoy"?c.yoyLineupModels:null;
+                    const thinMatch=view==="qoq"?!!c.qoqLowMatchedShare:view==="yoy"?!!c.yoyLowMatchedShare:false;
                     const growthWhy=view==="qoq"?(c.qoqReason||c.qoqNote):view==="yoy"?(c.yoyReason||c.yoyNote):null;
                     const shownLevel=hasEst?c.estimateAvgLabel:c.avgLabel;
+                    const ofLineup=lineup??c.modelCount??0;
                     const growthSub=(g)=>matched==null?shownLevel
-                      :g!=null?matched+(matched===1?" model":" models")+" like-for-like"
-                      :matched+" of "+(c.modelCount||0)+" in both qtrs";
+                      :g!=null?(thinMatch
+                        ?matched+" of "+ofLineup+" models like-for-like"
+                        :matched+(matched===1?" model":" models")+" like-for-like")
+                      :matched+" of "+ofLineup+" in both qtrs";
                     if(view==="qoq"){ main=refusedWhy?measureChangedTag():(c.qoqLabel||"—"); color=cellColor(c.qoq); sub=growthSub(c.qoq); }
                     else if(view==="yoy"){ main=refusedWhy?measureChangedTag():(c.yoyLabel||"—"); color=cellColor(c.yoy); sub=growthSub(c.yoy); }
                     else {
@@ -1007,7 +1079,14 @@ function ModelPricingHistoryBlock(){
                         // estimate is this quarter's list-price lineup average
                         // scaled by a ratio, so the lineup count is the honest
                         // figure and coverage does not apply to it at all.
-                        sub=c.modelCount?c.modelCount+(c.modelCount===1?" model":" models"):"";
+                        // A declared list price is not an estimate of anything:
+                        // no weights exist anywhere, so the cell shows its own
+                        // list price and says so in the server's words. That
+                        // marker IS the cell's caveat, so it takes the
+                        // sub-label; the model count stays on the hover.
+                        sub=c.estimateDeclared
+                          ?(c.estimateMarker||"list price · no usage weights")
+                          :(c.modelCount?c.modelCount+(c.modelCount===1?" model":" models"):"");
                       }
                     }
                     // Grey marks an EMPTY cell, not an estimated one. An estimate is
@@ -1021,11 +1100,19 @@ function ModelPricingHistoryBlock(){
                     };
                     const tip=weighted
                       ?(hasEst
-                        ?"ESTIMATE, not measured — "+c.estimateAvgLabel+", from "+
+                        ?(c.estimateDeclared
+                          // Not inferred from anything, so it must not read as
+                          // an estimate: the ratio is 1.00 by declaration and
+                          // the figure IS the list price on the same row.
+                          ?(c.estimateMarker||"List price, no usage weights")+" — "+c.estimateAvgLabel+
+                            " is this provider's own list-price average for the quarter, shown unweighted across "+
+                            (c.modelCount||0)+" model"+(c.modelCount===1?"":"s")+
+                            ". No usage weights could be built: "+(c.gateReason||"the weekly token series could not be loaded")
+                          :"ESTIMATE, not measured — "+c.estimateAvgLabel+", from "+
                           (EST_WHY[c.estimateBasis]||"an inferred ratio")+
                           " ("+(c.estimateRatio!=null?"x"+c.estimateRatio.toFixed(2):"—")+
                           " of the $"+(c.equalAvg!=null?c.equalAvg.toFixed(3):"—")+" list price). "+
-                          "Measured value withheld because: "+(c.gateReason||"it did not clear the gate")
+                          "Measured value withheld because: "+(c.gateReason||"it did not clear the gate"))
                       :withheld
                         ?"Withheld — "+(c.gateReason||"did not clear the coverage gate")+
                           " Equal-weighted for reference: "+(c.equalAvgLabel||"—")+"."
@@ -1038,7 +1125,11 @@ function ModelPricingHistoryBlock(){
                           (c.qoqLabel?" · QoQ "+c.qoqLabel:"")+(c.yoyLabel?" · YoY "+c.yoyLabel:""))
                       :(c.avgLabel||"—")+" avg · "+(c.modelCount||0)+" models in this quarter · "+(c.obsCount||0)+" daily observations"+(c.qoqLabel?" · QoQ "+c.qoqLabel:"")+(c.yoyLabel?" · YoY "+c.yoyLabel:"");
                     return(
-                      <td key={c.slug} style={{padding:"10px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",textAlign:"right",fontWeight:600,color,whiteSpace:"nowrap"}}
+                      // A thin match is published, but not presented as firmly:
+                      // lighter type, with "5 of 18 models like-for-like" under
+                      // it and the server's caveat sentence on hover. A dash
+                      // would have told the reader nothing at all.
+                      <td key={c.slug} style={{padding:"10px 10px",borderBottom:"1px solid #f9fafb",fontFamily:"monospace",textAlign:"right",fontWeight:thinMatch?400:600,color,whiteSpace:"nowrap"}}
                           title={refusedWhy||[growthWhy,tip,afterChangeTitle(afterChange?c.basis:null,c.basisExcludedObs)].filter(Boolean).join(" · ")}>
                         <div>{main}{view==="avg"&&afterChange&&main!=="—"&&afterChangeMark()}</div>
                         <div style={{fontSize:9,color:withheld&&!hasEst?"#d1d5db":"#9ca3af",fontWeight:400,marginTop:1}}>{sub}</div>
@@ -1101,6 +1192,11 @@ function ModelPricingHistoryBlock(){
         {showYoYStart&&<><b style={{color:"#374151"}}>{yoyStartQ?"YoY starts "+yoyStartQ:"No YoY yet"}</b>{" — the source's history begins "+(state.data?.earliestDateObserved||firstQ)+", so earlier quarters have no year-ago quarter"}<br/></>}
         <b style={{color:"#374151"}}>{unitHint}</b>
         {" · "}pricepertoken list prices{weighted?", weighted by OpenRouter token volume":""}
+        {/* The key for the lighter cells in the change views. The number under
+           one is correct; it just speaks for part of the lineup, and the
+           sub-label says which part. Rendered with the marker, never apart
+           from it. */}
+        {(view==="qoq"||view==="yoy")&&<>{" · "}a change resting on under half the lineup is shown in <span style={{fontWeight:400,color:"#374151"}}>lighter type</span> with the matched count beneath it (&quot;5 of 18 models like-for-like&quot;) — correct for those models, not a figure for the whole lineup</>}
         {weighted&&<>{" · "}hover any cell for its coverage and basis</>}
         {openness&&<>{" · "}<b style={{color:"#374151",fontWeight:600}}>open-weight</b> = weights published to download, any licence; <b style={{color:"#374151",fontWeight:600}}>proprietary</b> = API-only · classed per model, so Gemma and gpt-oss count as open · hover a column for its labs</>}
         {" · from "}{state.data?.earliestDateObserved||"2025-07-28"}
@@ -2554,6 +2650,14 @@ function GPUFinancialCorrelationBlock({fHist,fHistErr}){
   const hasAnyData=periods.length>0;
   const rowPoolAll=showSecondary?[...GPU_FIN_PRIMARY_ROWS,...GPU_FIN_SECONDARY_ROWS]:GPU_FIN_PRIMARY_ROWS;
   const growthReasons=effMode==="quarter"?(effFHist.quarterly?.qoqReason||{}):(effFHist.monthly?.momReason||{});
+  // A comparison across the 2026-07-28 change is no longer refused: the API
+  // restates it onto the measure both periods share — the straddling period
+  // was captured both ways — and says in words which days each side rests on.
+  // The figure is real, so it is printed; the note is what stops it being read
+  // as a headline-to-headline move, so it rides with the cell as a marker and
+  // a hover. Its legend is the methodology line under the table.
+  const growthNotes=effMode==="quarter"?(effFHist.quarterly?.qoqNote||{}):(effFHist.monthly?.momNote||{});
+  const yoyNotes=effMode==="quarter"?(effFHist.quarterly?.yoyNote||{}):(effFHist.monthly?.yoyNote||{});
 
   // Which measure each column is on, and where it changes. Derived from the
   // data on screen, never hard-coded to 2026-07-28, so the next time the
@@ -2730,16 +2834,16 @@ function GPUFinancialCorrelationBlock({fHist,fHistErr}){
 
                 {/* Section B: QoQ/MoM Growth */}
                 <tr><td colSpan={periods.length+1} style={finSectionTh}>{growthLabel}</td></tr>
-                {renderFinGrowthRows(GPU_FIN_PRIMARY_ROWS,growth,periods,false,series,partialKey,boundaryIdx,growthReasons)}
-                {!illustrative&&showSecondary&&renderFinGrowthRows(GPU_FIN_SECONDARY_ROWS,growth,periods,true,series,partialKey,boundaryIdx,growthReasons)}
+                {renderFinGrowthRows(GPU_FIN_PRIMARY_ROWS,growth,periods,false,series,partialKey,boundaryIdx,growthReasons,growthNotes)}
+                {!illustrative&&showSecondary&&renderFinGrowthRows(GPU_FIN_SECONDARY_ROWS,growth,periods,true,series,partialKey,boundaryIdx,growthReasons,growthNotes)}
 
                 {/* Spacer */}
                 <tr><td colSpan={periods.length+1} style={{height:8}}></td></tr>
 
                 {/* Section C: YoY Growth */}
                 <tr><td colSpan={periods.length+1} style={finSectionTh}>YoY Growth</td></tr>
-                {renderFinGrowthRows(GPU_FIN_PRIMARY_ROWS,yoy,periods,false,series,partialKey,boundaryIdx,null,true)}
-                {!illustrative&&showSecondary&&renderFinGrowthRows(GPU_FIN_SECONDARY_ROWS,yoy,periods,true,series,partialKey,boundaryIdx,null,true)}
+                {renderFinGrowthRows(GPU_FIN_PRIMARY_ROWS,yoy,periods,false,series,partialKey,boundaryIdx,null,yoyNotes,true)}
+                {!illustrative&&showSecondary&&renderFinGrowthRows(GPU_FIN_SECONDARY_ROWS,yoy,periods,true,series,partialKey,boundaryIdx,null,yoyNotes,true)}
 
                 {/* Spacer */}
                 <tr><td colSpan={periods.length+1} style={{height:8}}></td></tr>
@@ -2788,7 +2892,7 @@ function GPUFinancialCorrelationBlock({fHist,fHistErr}){
 
       {/* Methodology footnote — concise, customer-spec wording. */}
       <div style={{fontSize:10,color:"#9ca3af",lineHeight:1.5,marginTop:6}}>
-        <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> GPU prices are real daily observations averaged by SKU and calendar period — no estimates, no backfill. {hasBasisChange?<><b style={{color:"#6b7280",fontWeight:600}}>What the source publishes changed mid-history</b>, so a period carries one of two measures: through {basisChangeDate?dayBefore(basisChangeDate):"the earlier periods"} a per-vendor min–max range, of which the <b style={{color:"#6b7280",fontWeight:600}}>floor</b> (the single cheapest listing among ~50 providers) is shown; from {basisChangeDate||"the later periods"} a single <b style={{color:"#6b7280",fontWeight:600}}>median</b> across providers. The two are different statistics and their levels are not comparable — the floor is volatile and one outlier listing moves it, which is why it sits far below the median. A period that straddles the change takes the measure covering most of its days and averages only those days; its tooltip names the other measure and what it averaged.</>:<>Every period in this table is measured the same way — <b style={{color:"#6b7280",fontWeight:600}}>{priceBasisNote}</b> — so the levels are comparable end to end.</>} Growth is computed only between periods sharing a measure and only between completed periods; a period still in progress (QTD/MTD) is suppressed, and a cell spanning the change reads <span style={{color:"#b45309",fontWeight:600}}>measure changed</span> rather than a fabricated percentage. A <sup style={{color:"#b45309",fontWeight:700}}>&deg;</sup> marks a value resting on a period where under {Math.round(FIN_LOW_COVERAGE*100)}% of days carry a price. The column axis is continuous, so a period with no capture stays visible as an empty column. GPU prices are not summed, because there is no meaningful total price across SKUs. Provider count shows observed vendor breadth where available. Stable or rising prices in older GPUs can indicate tight supply or strong ROI.
+        <b style={{color:"#6b7280",fontWeight:600}}>Methodology:</b> GPU prices are real daily observations averaged by SKU and calendar period — no estimates, no backfill. {hasBasisChange?<><b style={{color:"#6b7280",fontWeight:600}}>What the source publishes changed mid-history</b>, so a period carries one of two measures: through {basisChangeDate?dayBefore(basisChangeDate):"the earlier periods"} a per-vendor min–max range, of which the <b style={{color:"#6b7280",fontWeight:600}}>floor</b> (the single cheapest listing among ~50 providers) is shown; from {basisChangeDate||"the later periods"} a single <b style={{color:"#6b7280",fontWeight:600}}>median</b> across providers. The two are different statistics and their levels are not comparable — the floor is volatile and one outlier listing moves it, which is why it sits far below the median. A period that straddles the change takes the measure covering most of its days and averages only those days; its tooltip names the other measure and what it averaged.</>:<>Every period in this table is measured the same way — <b style={{color:"#6b7280",fontWeight:600}}>{priceBasisNote}</b> — so the levels are comparable end to end.</>} Growth is computed only between completed periods; a period still in progress (QTD/MTD) is suppressed. A comparison spanning the change is restated onto the measure both periods share — the straddling period was captured both ways, so a like-for-like figure exists — and marked <sup style={{color:"#b45309",fontWeight:700}}>&Dagger;</sup>, with the days each side rests on in its tooltip; that is a real change, not a headline-to-headline one. Only where nothing converts between the two measures does a cell read <span style={{color:"#b45309",fontWeight:600}}>measure changed</span> rather than a fabricated percentage. A <sup style={{color:"#b45309",fontWeight:700}}>&deg;</sup> marks a value resting on a period where under {Math.round(FIN_LOW_COVERAGE*100)}% of days carry a price. The column axis is continuous, so a period with no capture stays visible as an empty column. GPU prices are not summed, because there is no meaningful total price across SKUs. Provider count shows observed vendor breadth where available. Stable or rising prices in older GPUs can indicate tight supply or strong ROI.
       </div>
     </div>
   );
@@ -2900,12 +3004,13 @@ function renderFinBasisRow(basisByPeriod,periods,boundaryIdx){
 // lean on a thinly-priced period on either side still render, but carry a
 // marker so nobody reads "+128.7%" as a clean month-over-month move when one
 // side of it is a 10-day stub.
-function renderFinGrowthRows(rows,growth,periods,dim,series,partialKey,boundaryIdx,reasons,isYoY){
+function renderFinGrowthRows(rows,growth,periods,dim,series,partialKey,boundaryIdx,reasons,notes,isYoY){
   const priorIdOf=isYoY?finYearPriorPeriodId:finPriorPeriodId;
   const priorNoun=isYoY?"the same period last year":"the prior period";
   return rows.map(row=>{
     const row_g=growth[row.sku]||{};
     const row_r=(reasons&&reasons[row.sku])||{};
+    const row_n=(notes&&notes[row.sku])||{};
     return(
       <tr key={"g-"+row.sku}>
         <td style={{...finTdRow,color:dim?"#6b7280":"#111827"}}>{row.shortLabel}</td>
@@ -2935,9 +3040,16 @@ function renderFinGrowthRows(rows,growth,periods,dim,series,partialKey,boundaryI
           const refusal=v==null?row_r[p.period]:null;
           const curBasis=finBasis(cur), priorBasis=finBasis(prior);
           const basisBreak=v==null&&curBasis&&priorBasis&&curBasis!==priorBasis;
+          // Set only where the two periods are headlined on different measures
+          // and the API restated the change onto the one they share, through a
+          // straddle period captured both ways. The figure is like-for-like,
+          // but it is not a headline-to-headline move, and the note names the
+          // days each side rests on. Marked ‡, whose legend is the methodology
+          // line under this table.
+          const restated=v!=null?row_n[p.period]:null;
           const title=v!=null?(
             "vs "+(priorId||priorNoun)+
-            (curBasis?" · both on the "+FIN_BASIS_SHORT[curBasis]+" basis":"")+
+            (restated?" · "+restated:(curBasis?" · both on the "+FIN_BASIS_SHORT[curBasis]+" basis":""))+
             (curCov!=null?" · this period "+Math.round(curCov*100)+"% priced":"")+
             (priorCov!=null?" · "+(isYoY?"year-ago":"prior")+" period "+Math.round(priorCov*100)+"% priced":"")+
             (thin?" · thin coverage on one side — treat as indicative":"")
@@ -2947,9 +3059,10 @@ function renderFinGrowthRows(rows,growth,periods,dim,series,partialKey,boundaryI
             <td key={p.period} style={{...finTdDim,...bStyle}} title={title}>
               {basisBreak
                 // Named rather than left as an em-dash: this is the cell the
-                // customer's eye lands on when asking "why did it jump?".
+                // customer's eye lands on when asking "why did it jump?". Only
+                // reached now where nothing converts between the two measures.
                 ? measureChangedTag()
-                : <>{fmtGrowth(v)}{thin&&<sup style={{color:"#b45309",fontSize:8,fontWeight:700,marginLeft:1}}>&deg;</sup>}</>}
+                : <>{fmtGrowth(v)}{restated&&<sup style={{color:"#b45309",fontSize:8,fontWeight:700,marginLeft:1}}>&Dagger;</sup>}{thin&&<sup style={{color:"#b45309",fontSize:8,fontWeight:700,marginLeft:1}}>&deg;</sup>}</>}
             </td>
           );
         })}
@@ -3641,6 +3754,12 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
   const d7=hist.comparisons?.d7||{};
   const d30=hist.comparisons?.d30||{};
   const signals=hist.signals||{};
+  // What each signal was classified ON. A stretched comparator is no longer
+  // refused — the 26-day move across the capture gap is a real like-for-like
+  // price change — so the badge must name the span it rests on rather than sit
+  // under a "7D change" heading implying seven. `label` is the signal as it
+  // should be read aloud ("loosening · 26d"); `reason` is the full sentence.
+  const signalBasis=hist.signalBasis||{};
   const series=hist.series||{};
   const latestBySku=hist.latest||{};
   const trackedSKUs=hist.trackedSKUs||[];
@@ -3702,6 +3821,19 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
           const nowTxt=latestPt?.dailyPrice!=null
             ?"now $"+latestPt.dailyPrice.toFixed(2)+(latestPt.dailyBasis?" "+FIN_BASIS_SHORT[latestPt.dailyBasis]:"")
             :null;
+          // The supply signal is classified on whatever comparator exists, so
+          // it survives the stretched window that keeps the 7D FIGURE off this
+          // card. It is drawn in both branches, named with the span it rests
+          // on: a blank card with no badge told the reader nothing while the
+          // server had already made the call.
+          const sig=signals[sku];
+          const sb=signalBasis[sku]||null;
+          const sigLabel=sig==="loosening"||sig==="tightening"||sig==="stable"?((sb&&sb.label)||sig):null;
+          const sigBg=sig==="loosening"?"#dcfce7":sig==="tightening"?"#fee2e2":sig==="stable"?"#f3f4f6":"#f3f4f6";
+          const sigFg=sig==="loosening"?"#059669":sig==="tightening"?"#dc2626":sig==="stable"?"#6b7280":"#9ca3af";
+          const sigBadge=sigLabel
+            ?<span title={(sb&&sb.reason)||undefined} style={{fontSize:9,padding:"1px 6px",borderRadius:3,background:sigBg,color:sigFg,fontWeight:600,textTransform:"uppercase",letterSpacing:".04em"}}>{sigLabel}</span>
+            :null;
           // Refused exactly as the table below refuses it. Across the capture
           // gap the nearest earlier day is 26 days back, and printing that
           // move — or its provider change — under "7D" is the mislabel.
@@ -3713,9 +3845,12 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
                 ?"nearest earlier capture is "+c.actualSpanDays+" days back ("+c.priorDate+")"
                 :"the price measure changed in between";
             return(
-              <div key={sku} title={why} style={{background:"#fafafa",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"10px 12px"}}>
-                <div style={{...S.lbl,color:"#6b7280",fontSize:9}}>{short} · 7D change</div>
-                <div style={{fontSize:12,fontWeight:600,color:"#9ca3af",marginTop:4}}>{!c||c.status!=="ok"?"not enough data yet":"no 7-day comparison"}</div>
+              <div key={sku} style={{background:"#fafafa",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"10px 12px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
+                  <div style={{...S.lbl,color:"#6b7280",fontSize:9}}>{short} · 7D change</div>
+                  {sigBadge}
+                </div>
+                <div title={why} style={{fontSize:12,fontWeight:600,color:"#9ca3af",marginTop:4}}>{!c||c.status!=="ok"?"not enough data yet":"no 7-day comparison"}</div>
                 <div style={{fontSize:10,color:"#9ca3af",marginTop:2}}>{sub}</div>
                 {nowTxt&&<div style={{fontSize:10,color:"#9ca3af",marginTop:2}}>{nowTxt}</div>}
               </div>
@@ -3727,15 +3862,11 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
           const down=pct!=null&&pct<0;
           const color=up?"#dc2626":down?"#059669":"#6b7280";
           const arrow=up?"▲":down?"▼":"•";
-          const sig=signals[sku];
-          const sigLabel=sig==="loosening"?"loosening":sig==="tightening"?"tightening":sig==="stable"?"stable":null;
-          const sigBg=sig==="loosening"?"#dcfce7":sig==="tightening"?"#fee2e2":sig==="stable"?"#f3f4f6":"#f3f4f6";
-          const sigFg=sig==="loosening"?"#059669":sig==="tightening"?"#dc2626":sig==="stable"?"#6b7280":"#9ca3af";
           return(
             <div key={sku} style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:8,padding:"10px 12px"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
                 <div style={{...S.lbl,color:"#6b7280",fontSize:9}}>{short} · 7D change</div>
-                {sigLabel&&<span style={{fontSize:9,padding:"1px 6px",borderRadius:3,background:sigBg,color:sigFg,fontWeight:600,textTransform:"uppercase",letterSpacing:".04em"}}>{sigLabel}</span>}
+                {sigBadge}
               </div>
               <div style={{display:"flex",alignItems:"baseline",gap:6,marginTop:4}}>
                 <span style={{fontSize:16,fontWeight:700,color}}>{arrow}&nbsp;{pct==null?"—":(pct>0?"+":"")+pct.toFixed(1)+"%"}</span>
@@ -3749,6 +3880,16 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
           );
         })}
       </div>
+
+      {/* Legend for the badge's span suffix. A badge reads "loosening · 26d"
+         whenever the nearest earlier capture is further back than the seven
+         days the card is headed with, so the key ships with the marker rather
+         than leaving a number on screen with nothing to read it by. */}
+      {GPU_HISTORY_TREND_SKUS.some(sku=>signalBasis[sku]&&signalBasis[sku].windowStretched&&signalBasis[sku].label)&&(
+        <div style={{fontSize:10,color:"#9ca3af",marginTop:-4,marginBottom:10,lineHeight:1.5}}>
+          A badge reading <b style={{color:"#6b7280",fontWeight:600}}>signal · Nd</b> was classified on a comparison spanning N days, not the 7 the card is headed with: the daily capture has a gap, so the nearest earlier day sits further back. The move itself is like-for-like — hover the badge for the dates and the measure.
+        </div>
+      )}
 
       {/* Strategic history comparison table */}
       <div style={{border:"0.5px solid #e5e7eb",borderRadius:8,overflow:"hidden",background:"#fff",marginBottom:10}}>
@@ -3800,30 +3941,39 @@ function GPUHistoryBlock({hist,histErr,hideHeader}){
         </div>
       </div>
 
-      {/* Textual signal summary — only show when data-grounded */}
+      {/* Textual signal summary — only show when data-grounded.
+         A stretched comparator is now classified rather than refused, so a
+         26-day move can reach this strip. Under a fixed "Signal (7D)" heading
+         that is a mislabel, so the heading names the span actually summarised
+         and any message off a different one carries its own. */}
       {(() => {
         const msgs=[];
+        const spans=new Set();
         for(const sku of GPU_HISTORY_TREND_SKUS){
           const c=d7[sku];
           const sig=signals[sku];
           if(!c||c.status!=="ok"||!sig||sig==="insufficient-data")continue;
           const short=sku.replace(/^Nvidia\s+/i,"");
+          const sb=signalBasis[sku];
+          const span=(sb&&sb.spanDays!=null?sb.spanDays:c.actualSpanDays)??7;
+          const spanTag=span===7?"":" over "+span+"d";
           if(sig==="loosening"){
             const parts=[];
             if(c.priceDeltaPct!=null&&c.priceDeltaPct<=-2)parts.push((FIN_BASIS_SHORT[c.priceBasis]||"price")+" "+c.priceDeltaPct.toFixed(1)+"%");
             if(c.providerDelta!=null&&c.providerDelta>0)parts.push("+"+c.providerDelta+" providers");
-            if(parts.length)msgs.push(short+" loosening ("+parts.join(" · ")+")");
+            if(parts.length){msgs.push(short+" loosening ("+parts.join(" · ")+spanTag+")");spans.add(span);}
           } else if(sig==="tightening"){
             const parts=[];
             if(c.priceDeltaPct!=null&&c.priceDeltaPct>=2)parts.push((FIN_BASIS_SHORT[c.priceBasis]||"price")+" +"+c.priceDeltaPct.toFixed(1)+"%");
             if(c.providerDelta!=null&&c.providerDelta<0)parts.push(c.providerDelta+" providers");
-            if(parts.length)msgs.push(short+" tightening ("+parts.join(" · ")+")");
+            if(parts.length){msgs.push(short+" tightening ("+parts.join(" · ")+spanTag+")");spans.add(span);}
           }
         }
         if(!msgs.length)return null;
+        const heading=spans.size===1?"Signal ("+[...spans][0]+"D):":"Signal (nearest comparator):";
         return(
           <div style={{background:"#fef3c7",border:"0.5px solid #fde68a",borderRadius:6,padding:"8px 12px",fontSize:11,color:"#92400e",marginBottom:6}}>
-            <b style={{fontWeight:600}}>Signal (7D):</b> {msgs.join(" · ")}
+            <b style={{fontWeight:600}}>{heading}</b> {msgs.join(" · ")}
           </div>
         );
       })()}
