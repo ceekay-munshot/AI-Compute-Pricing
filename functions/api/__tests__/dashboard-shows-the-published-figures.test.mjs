@@ -254,3 +254,32 @@ test('the endpoints still publish every field this page now depends on', () => {
     assert.ok(share.includes(f), 'pricing-share-signal.js no longer publishes ' + f);
   }
 });
+
+/* ── The dagger must be DRAWN where the footnote promises it ──────────────
+   The Methodology note under the model-pricing matrix states that "a price
+   reported after it carries a †". It said so while nothing in that table drew
+   one: afterChangeMark existed, but only the PROVIDER matrix called it. A
+   reader hunted for a symbol that was not there, and meanwhile pre- and
+   post-change levels sat in one row with nothing distinguishing them — a
+   change of measure reading as a price move.
+
+   This repo has already shipped the mirror of this bug: a dagger whose only
+   legend had been deleted, leaving a symbol with no key. Both halves are
+   pinned here, so removing either one fails until both go. */
+test('the model matrix draws the dagger its footnote promises', () => {
+  const table = code(fnSource('ModelPricingMatrixTable'));
+  assert.match(table, /dagger/,
+    'the footnote no longer explains the dagger — if the marker went, remove both');
+  assert.match(table, /afterChangeMark\(\)/,
+    'the footnote promises a dagger on post-change prices and the table draws none: ' +
+    'afterChangeMark() is never called in ModelPricingMatrixTable');
+});
+
+test('a missing price in the model matrix says why', () => {
+  // "not released yet", "upstream dropped the listing" and "the parser missed
+  // it" were one identical pixel, directly above change rows that explain
+  // every blank they have.
+  const table = code(fnSource('ModelPricingMatrixTable'));
+  assert.match(table, /No price for this model in/,
+    'a null price still renders a bare dash with no tooltip');
+});

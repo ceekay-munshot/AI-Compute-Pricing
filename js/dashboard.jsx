@@ -1470,9 +1470,23 @@ function ModelPricingMatrixTable(){
       {periods.map((p,i)=>{
         const val=rep[metricKey]?.[p.id];
         const basis=rep.priceBasis?.[metricKey]?.[p.id];
+        const after=val!=null&&!!basis&&basis!=="origin";
+        // The Methodology note under this table promises that "a price reported
+        // after it carries a †". It was promised and never drawn: the marker
+        // existed but only the PROVIDER matrix rendered it, so a reader hunted
+        // for a symbol that was not there while pre- and post-change levels sat
+        // in one row with nothing distinguishing them — a change of measure
+        // reading as a price move. A legend with no marker is the same fault as
+        // a marker with no legend.
+        const why=afterChangeTitle(basis,rep.basisExcludedObs?.[metricKey]?.[p.id])
+          ||(val==null?"No price for this model in "+p.label+".":undefined);
         return(
-          <td key={p.id} style={{...tdMain,...bStyle(i)}} title={afterChangeTitle(basis,rep.basisExcludedObs?.[metricKey]?.[p.id])}>
-            {fmtPrice(val)}
+          <td key={p.id} style={{...tdMain,...bStyle(i)}} title={why}
+              // A missing price must not read as a dead cell when the reason is known.
+              >
+            {val==null
+              ?<span style={{color:"#9ca3af",borderBottom:"1px dotted #d1d5db",cursor:"help"}}>{fmtPrice(val)}</span>
+              :<>{fmtPrice(val)}{after&&afterChangeMark()}</>}
           </td>
         );
       })}
