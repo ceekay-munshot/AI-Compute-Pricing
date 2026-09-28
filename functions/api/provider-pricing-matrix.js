@@ -36,9 +36,12 @@
  *     half the lineup the change is still published, marked
  *     <key>LowMatchedShare with its counts, so the screen can say "5 of 18
  *     models like-for-like" instead of printing a dash over a figure that was
- *     computed and correct (matchedModelGrowth). Model-day view only. The usage-weighted view compares the levels it
- *     shows, measured or estimated, so its QoQ/YoY reconcile with its Avg
- *     cells; a change resting on an estimate says so (<key>Estimated, <key>Note).
+ *     computed and correct (matchedModelGrowth). Model-day view only. The
+ *     usage-weighted view compares the levels it shows, measured or estimated,
+ *     so its QoQ/YoY reconcile with its Avg cells; a change resting on an
+ *     estimate says so (<key>Estimated, <key>Note). Where no weights could be
+ *     built at all, every cell shows its list-price average, marked, and the
+ *     change is the like-for-like list-price one (<key>ListPrice).
  *   - The source can change WHAT it reports: on 2026-07-10 its figure for 13
  *     Google and 10 OpenAI models fell to exactly half on one day. Every price
  *     is read, and every quarter's measure decided, by _model-price-basis.js:
