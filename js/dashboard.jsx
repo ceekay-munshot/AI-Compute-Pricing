@@ -129,6 +129,13 @@ function joinNames(names){
    The sentence was hardcoded to the daily measure too, and would have been
    describing a measure no longer in force. Both come from the server now, which
    is the only thing that knows which measure it used. */
+function quarterCoverage(q,basis){
+  if(!q)return null;
+  if(basis&&basis.measure==="provider-weekly")
+    return q.shareWeeks?q.shareWeeks+" week"+(q.shareWeeks===1?"":"s")+" in "+q.quarter:null;
+  return q.shareDays?q.shareDays+" in "+q.quarter:null;
+}
+
 function ShareBasisNote({ basis, days }){
   if(!basis||!basis.measureNote) return null;
   const x=basis.excludedDays||{};
@@ -145,7 +152,7 @@ function ShareBasisNote({ basis, days }){
       <span>
         <b style={{color:"#374151"}}>Share:</b> {basis.measureNote}
         {onWeekly
-          ? (basis.weeks?" Averaged over "+basis.weeks+" week"+(basis.weeks===1?"":"s")+" of the quarter.":null)
+          ? (days?" ("+days+")":basis.weeks?" Averaged over "+basis.weeks+" week"+(basis.weeks===1?"":"s")+" of the quarter.":null)
           : (days?" ("+days+" counted days)":null)}
         {basis.fallback?" The weekly series could not be read ("+(basis.fallbackReason||"reason unavailable")+"), so the daily captures stood in.":null}
         {parts.length?" Of all captured days, not counted: "+joinNames(parts)+".":null}
@@ -356,7 +363,7 @@ function PricingSharePartialView({ header, quarter, basis }){
       <div style={{display:"flex",flexWrap:"wrap",gap:"4px 10px",fontSize:10,color:"#6b7280",marginTop:8,lineHeight:1.5}}>
         <span><b style={{color:"#374151"}}>Scope:</b> partial view — Price QoQ shown, Share QoQ unavailable until a comparable prior quarter exists</span>
         <span>·</span>
-        <ShareBasisNote basis={basis} days={quarter.shareDays?quarter.shareDays+" in "+quarter.quarter:""}/>
+        <ShareBasisNote basis={basis} days={quarterCoverage(quarter,basis)||""}/>
         <span><b style={{color:"#374151"}}>Sources:</b> pricepertoken provider pricing history + OpenRouter snapshots</span>
       </div>
     </div>
@@ -668,7 +675,7 @@ function PricingShareSignalBlock(){
         <span>·</span>
         <span><b style={{color:"#374151"}}>Scope:</b> directional ecosystem read-through, not a causal claim</span>
         <span>·</span>
-        <ShareBasisNote basis={d.shareBasis} days={[latest,priorQ].filter(q=>q&&q.shareDays).map(q=>q.shareDays+" in "+q.quarter).join(", ")}/>
+        <ShareBasisNote basis={d.shareBasis} days={[latest,priorQ].map(q=>quarterCoverage(q,d.shareBasis)).filter(Boolean).join(", ")}/>
         <span><b style={{color:"#374151"}}>Sources:</b> pricepertoken provider pricing history + OpenRouter snapshots</span>
       </div>
     </div>

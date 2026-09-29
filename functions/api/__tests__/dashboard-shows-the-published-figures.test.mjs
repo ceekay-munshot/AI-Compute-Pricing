@@ -283,3 +283,22 @@ test('a missing price in the model matrix says why', () => {
   assert.match(table, /No price for this model in/,
     'a null price still renders a bare dash with no tooltip');
 });
+
+/* ── A quarter's coverage is shown on whichever measure is in force ───────
+   shareDays is 0 on the provider-weekly measure by design — that measure has
+   no counted days, and the week count lives in shareWeeks. A note built from
+   shareDays alone therefore printed nothing at all on the weekly measure, so
+   a quarter resting on three weeks and one resting on thirteen looked exactly
+   the same. The number existed the whole time; nothing read it. */
+test('the share note reads the count the measure actually uses', () => {
+  assert.match(SRC, /function quarterCoverage\(/,
+    'the coverage figure is built from shareDays alone again, which is 0 on the weekly measure');
+  const helper = code(fnSource('quarterCoverage'));
+  assert.match(helper, /shareWeeks/, 'the week count is not read on the weekly measure');
+  assert.match(helper, /shareDays/, 'the day count is not read on the daily measure');
+  assert.match(helper, /provider-weekly/, 'the helper does not branch on which measure is in force');
+
+  // Both call sites must use it, or one view keeps the old blind spot.
+  const calls = (SRC.match(/quarterCoverage\(/g) || []).length;
+  assert.ok(calls >= 3, 'expected the helper plus both call sites, found ' + calls);
+});
