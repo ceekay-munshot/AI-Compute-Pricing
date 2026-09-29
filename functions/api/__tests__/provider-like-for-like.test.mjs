@@ -10,8 +10,9 @@
  *
  * Measured on the live source on 2026-09-21, like-for-like: Anthropic 2026-Q3
  * QoQ is 0.0% over 14 of 18 models (was -10.4%), 2026-Q2 0.0% over 12 of 18
- * (was +55.9%), and its YoY matches only 5 of 18 models and is refused (was
- * +24.0%). The fixtures below are reduced to the cases that decide each rule.
+ * (was +55.9%), and its YoY matches only 5 of 18 models — published, with the
+ * match named (was +24.0%). The fixtures below are reduced to the cases that
+ * decide each rule.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -85,7 +86,9 @@ test('a model listed or retired between quarters is not a price change', async (
   assert.equal(q3.qoq, 0);
   assert.equal(q3.qoqLabel, '0.0%');
   assert.equal(q3.qoqMatchedModels, 3);
+  assert.equal(q3.qoqLineupModels, 4);
   assert.equal(q3.qoqTooFewMatched, undefined);
+  assert.equal(q3.qoqLowMatchedShare, undefined);
   assert.equal(q3.qoqMeasureChanged, undefined);
   assert.match(q3.qoqNote, /^Like-for-like: the 3 models priced in both Q2 2026 and Q3 2026/);
   assert.match(q3.qoqNote, /1 model priced only in Q3 2026 and 1 model priced only in Q2 2026 are left out of the change/);
@@ -120,7 +123,7 @@ test('a genuine price cut on a model priced in both quarters is still reported',
   assert.match(q3.mistralai.qoqNote, /No model was added or dropped between them/);
 });
 
-/* ── Too few models priced in both: refused, with a reason ───────────── */
+/* ── Fewer than two models priced in both: refused, with a reason ─────── */
 
 test('growth is refused when fewer than two models were priced in both quarters', async () => {
   const d = await matrix({
@@ -141,10 +144,13 @@ test('growth is refused when fewer than two models were priced in both quarters'
   assert.equal(c.avg, 1.5, 'the level is still published');
 });
 
-test('growth is refused when under half the lineup was priced in both, and computed at half', async () => {
+/* ── Under half the lineup: computed, and said to be thin ─────────────── */
+
+test('a change on under half the lineup is published, counted and marked', async () => {
   const d = await matrix({
-    // 2 of 5 models in Q3 were priced in Q2: refused, even though one of them
-    // genuinely halved — two survivors do not stand for a five-model lineup.
+    // 2 of 5 models in Q3 were priced in Q2, and one of them genuinely halved.
+    // That is a correct like-for-like figure for those two, so it is published
+    // with what it rests on — a dash would have said nothing at all.
     xai: [
       ...hist('grok-a', [[S, Q2_END, 2e-6], [Q3_START, E, 1e-6]]),
       ...hist('grok-b', [[S, E, 3e-6]]),
@@ -152,7 +158,7 @@ test('growth is refused when under half the lineup was priced in both, and compu
       ...hist('grok-d', [[Q3_START, E, 3e-7]]),
       ...hist('grok-e', [[Q3_START, E, 4e-7]]),
     ],
-    // 2 of 4: exactly half, computed.
+    // 2 of 4: exactly half, so not thin.
     deepseek: [
       ...hist('ds-a', [[S, Q2_END, 1e-6], [Q3_START, E, 9e-7]]),
       ...hist('ds-b', [[S, E, 2e-6]]),
@@ -161,17 +167,22 @@ test('growth is refused when under half the lineup was priced in both, and compu
     ],
   });
   const q3 = cellsOf(d, '2026-Q3');
-  assert.equal(q3.xai.qoq, null);
-  assert.equal(q3.xai.qoqTooFewMatched, true);
+  // (1 + 3) / (2 + 3) - 1 = -20%: true of grok-a and grok-b, and said to be.
+  assert.equal(q3.xai.qoq, -0.2);
+  assert.equal(q3.xai.qoqLowMatchedShare, true);
   assert.equal(q3.xai.qoqMatchedModels, 2);
-  assert.match(q3.xai.qoqReason, /only 2 of the 5 models priced in Q3 2026 were also priced in Q2 2026/);
-  assert.match(q3.xai.qoqReason, /fewer than half of this lineup/);
+  assert.equal(q3.xai.qoqLineupModels, 5);
+  assert.equal(q3.xai.qoqTooFewMatched, undefined, 'a computable change is not refused');
+  assert.equal(q3.xai.qoqReason, undefined, 'a published change carries a note, not a refusal');
+  assert.match(q3.xai.qoqNote, /Only 2 of the 5 models priced in Q3 2026 were also priced in Q2 2026 — under half the lineup/);
   assert.equal(q3.deepseek.qoq, Math.round((2.9 / 3 - 1) * 1000) / 1000);
   assert.equal(q3.deepseek.qoqMatchedModels, 2);
+  assert.equal(q3.deepseek.qoqLineupModels, 4);
+  assert.equal(q3.deepseek.qoqLowMatchedShare, undefined, 'exactly half is not thin');
   assert.equal(q3.deepseek.qoqTooFewMatched, undefined);
 });
 
-test('YoY is like-for-like too, and refused on a lineup that mostly turned over', async () => {
+test('YoY is like-for-like too, and names a mostly-turned-over lineup', async () => {
   const Y0 = '2025-07-28', Y_END = '2025-09-30';
   const d = await matrix({
     'meta-llama': [
@@ -194,15 +205,21 @@ test('YoY is like-for-like too, and refused on a lineup that mostly turned over'
   assert.equal(q3['meta-llama'].yoy, 0);
   assert.equal(q3['meta-llama'].yoyMatchedModels, 3);
   assert.match(q3['meta-llama'].yoyNote, /priced in both Q3 2025 and Q3 2026/);
-  assert.equal(q3.cohere.yoy, null);
-  assert.equal(q3.cohere.yoyTooFewMatched, true);
-  assert.match(q3.cohere.yoyReason, /only 2 of the 5 models priced in Q3 2026 were also priced in Q3 2025/);
-  // Its QoQ matches all five and is computed.
+  // Two of five is a real, correct number for those two — published, marked.
+  assert.equal(q3.cohere.yoy, 0);
+  assert.equal(q3.cohere.yoyLowMatchedShare, true);
+  assert.equal(q3.cohere.yoyMatchedModels, 2);
+  assert.equal(q3.cohere.yoyLineupModels, 5);
+  assert.equal(q3.cohere.yoyTooFewMatched, undefined);
+  assert.equal(q3.cohere.yoyReason, undefined);
+  assert.match(q3.cohere.yoyNote, /under half the lineup/);
+  // Its QoQ matches all five and is computed without a caveat.
   assert.equal(q3.cohere.qoq, 0);
   assert.equal(q3.cohere.qoqMatchedModels, 5);
+  assert.equal(q3.cohere.qoqLowMatchedShare, undefined);
 });
 
-/* ── A change of measure is still refused, and nothing re-enters ──────── */
+/* ── A change of measure is linked, and nothing re-enters ─────────────── */
 
 test('across the change of measure every moved model is linked at its exact factor, a returned one included', async () => {
   const Q4_END = '2026-10-31';

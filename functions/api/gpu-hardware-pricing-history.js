@@ -41,7 +41,11 @@
  *     latest: { "Nvidia H100": {...} },
  *     series: { "Nvidia H100": [ {date, minPricePerHour, ...} ] },
  *     comparisons: { d7: {...}, d30: {...} },
- *     signals: { "Nvidia H100": "loosening" | ... }
+ *     signals: { "Nvidia H100": "loosening" | ... },
+ *     signalBasis: { "Nvidia H100": { label:"loosening · 26d", spanDays,
+ *                     windowStretched, priceBasis, reason, priorDate, latestDate } }
+ *       What the signal was classified on. The span is part of the claim:
+ *       a 26-day move printed under a "7D" heading is a different statement.
  *   }
  *
  * Response — quarter view:
@@ -87,7 +91,8 @@ import {
   normalizeDailyPoint,
   periodHeadline,
   pricedDatesForBasis,
-  periodGrowth,
+  periodGrowthDetail,
+  basisLinkBetween,
   growthRefusalReason,
   detectBasisTimeline,
   basisChangeForPeriods,
@@ -392,13 +397,18 @@ export async function onRequestGet({ request, env }) {
   // stable: small movement in both dimensions
   //
   // A signal is a market claim, so it is refused whenever the evidence has
-  // gone missing rather than quietly falling back to whatever is left. Two
-  // ways that used to happen:
-  //   • the price delta went null when the feed stopped publishing a floor,
-  //     leaving provider count as the sole input. GB200 then read
-  //     "tightening" because one vendor dropped off a listing page.
-  //   • the comparator drifted to 26 days old across the capture gap and the
-  //     move was still labelled a 7-day signal.
+  // gone missing rather than quietly falling back to whatever is left. The way
+  // that used to happen: the price delta went null when the feed stopped
+  // publishing a floor, leaving provider count as the sole input. GB200 then
+  // read "tightening" because one vendor dropped off a listing page. That is
+  // still refused, and it is now the ONLY refusal — see below.
+  //
+  // A stretched window is not missing evidence. When the comparator drifted to
+  // 26 days old across the capture gap the delta was still a real, like-for-
+  // like price move; calling it 'insufficient-data' blanked the card and told
+  // the reader nothing, while the move itself sat one field away. So the
+  // classification runs on the comparator that exists and signalBasis names
+  // its span — "loosening · 26d" — instead of a 7-day claim or a blank.
   const signals = {};
   const signalBasis = {};
   for (const sku of availableSKUs) {
@@ -420,15 +430,6 @@ export async function onRequestGet({ request, env }) {
       };
       continue;
     }
-    if (c.windowStretched) {
-      signals[sku] = 'insufficient-data';
-      signalBasis[sku] = {
-        reason: 'nearest comparator is ' + c.actualSpanDays + ' days old, not 7 — capture gap',
-        priorDate: c.priorDate,
-        latestDate: c.latestDate,
-      };
-      continue;
-    }
     const pricePct = c.priceDeltaPct;
     const providerDelta = c.providerDelta;
     const priceDown = pricePct != null && pricePct <= -2;
@@ -442,6 +443,22 @@ export async function onRequestGet({ request, env }) {
     } else {
       signals[sku] = 'stable';
     }
+    // The span is part of the claim, not a footnote to it: a 26-day move
+    // printed under a "7D" heading is a different statement from the same
+    // move printed as 26d. `label` is the signal as it should be read aloud.
+    signalBasis[sku] = {
+      reason:
+        'classified on the nearest comparator, ' + c.priorDate + ' to ' + c.latestDate + ' — ' +
+        c.actualSpanDays + ' day' + (c.actualSpanDays === 1 ? '' : 's') +
+        (c.windowStretched ? ', not the 7 asked for (capture gap)' : '') +
+        ', on the ' + BASIS_LABEL[c.priceBasis],
+      label: signals[sku] + ' · ' + c.actualSpanDays + 'd',
+      spanDays: c.actualSpanDays,
+      windowStretched: c.windowStretched,
+      priceBasis: c.priceBasis,
+      priorDate: c.priorDate,
+      latestDate: c.latestDate,
+    };
   }
 
   // Enough-data flags: we need at least one point ≥ Nd old AND a latest point.
@@ -1064,6 +1081,26 @@ function buildFinancialResponse(ctx) {
   const yoyQuarter = {};
   const momReason = {};
   const qoqReason = {};
+  // Where a figure crosses the change of measure it is computed on the measure
+  // both sides share, not on their headlines. That is a real number and it is
+  // shown, but it is not the same thing as a headline-to-headline move, so the
+  // note says which days it rests on. Present only for the linked cells.
+  const momNote = {};
+  const qoqNote = {};
+  const yoyMonthNote = {};
+  const yoyQuarterNote = {};
+
+  // Fill one growth cell, using the straddle period between the two sides as
+  // the conversion when their headlines are measured differently.
+  const fillGrowth = (records, cur, prior, priorId, pct, reason, note) => {
+    const link = basisLinkBetween(records, cur, prior);
+    const detail = periodGrowthDetail(cur, prior, link);
+    pct[cur.period] = detail ? detail.pct : null;
+    if (detail && detail.note) note[cur.period] = detail.note;
+    if (pct[cur.period] == null && reason) {
+      reason[cur.period] = growthRefusalReason(cur, prior, prior ? prior.label : priorId, link);
+    }
+  };
 
   for (const sku of availableSKUs) {
     mom[sku] = {};
@@ -1072,20 +1109,21 @@ function buildFinancialResponse(ctx) {
     yoyQuarter[sku] = {};
     momReason[sku] = {};
     qoqReason[sku] = {};
+    momNote[sku] = {};
+    qoqNote[sku] = {};
+    yoyMonthNote[sku] = {};
+    yoyQuarterNote[sku] = {};
 
     // MoM
     const months = monthlyBySku[sku];
     const monthByPeriod = Object.fromEntries(months.map(x => [x.period, x]));
     for (const cur of months) {
       const priorId = priorMonthId(cur.period);
-      const prior = monthByPeriod[priorId];
-      mom[sku][cur.period] = periodGrowth(cur, prior);
-      if (mom[sku][cur.period] == null) {
-        momReason[sku][cur.period] = growthRefusalReason(cur, prior, prior ? prior.label : priorId);
-      }
+      fillGrowth(months, cur, monthByPeriod[priorId], priorId,
+                 mom[sku], momReason[sku], momNote[sku]);
       const yoyId = yearPriorMonthId(cur.period);
-      const yoyPrior = monthByPeriod[yoyId];
-      yoyMonth[sku][cur.period] = periodGrowth(cur, yoyPrior);
+      fillGrowth(months, cur, monthByPeriod[yoyId], yoyId,
+                 yoyMonth[sku], null, yoyMonthNote[sku]);
     }
 
     // QoQ + YoY (quarter)
@@ -1093,14 +1131,11 @@ function buildFinancialResponse(ctx) {
     const quarterByPeriod = Object.fromEntries(quarters.map(x => [x.period, x]));
     for (const cur of quarters) {
       const priorId = priorQuarterId(cur.period);
-      const prior = quarterByPeriod[priorId];
-      qoq[sku][cur.period] = periodGrowth(cur, prior);
-      if (qoq[sku][cur.period] == null) {
-        qoqReason[sku][cur.period] = growthRefusalReason(cur, prior, prior ? prior.label : priorId);
-      }
+      fillGrowth(quarters, cur, quarterByPeriod[priorId], priorId,
+                 qoq[sku], qoqReason[sku], qoqNote[sku]);
       const yoyId = yearPriorQuarterId(cur.period);
-      const yoyPrior = quarterByPeriod[yoyId];
-      yoyQuarter[sku][cur.period] = periodGrowth(cur, yoyPrior);
+      fillGrowth(quarters, cur, quarterByPeriod[yoyId], yoyId,
+                 yoyQuarter[sku], null, yoyQuarterNote[sku]);
     }
   }
 
@@ -1229,14 +1264,18 @@ function buildFinancialResponse(ctx) {
       series: monthlyBySku,
       mom,
       momReason,
+      momNote,
       yoy: yoyMonth,
+      yoyNote: yoyMonthNote,
     },
     quarterly: {
       labels: quarterlyLabels,
       series: quarterlyBySku,
       qoq,
       qoqReason,
+      qoqNote,
       yoy: yoyQuarter,
+      yoyNote: yoyQuarterNote,
     },
     priceBasis: priceBasisInfo,
     methodology: weeklyOnly ? {
@@ -1338,8 +1377,8 @@ function emptyFinancialResponse(reason) {
     secondarySKUs: FINANCIAL_SECONDARY_SKUS,
     trackedSKUs: TRACKED_SKUS,
     availableSKUs: [],
-    monthly: { labels: [], series: {}, mom: {}, momReason: {}, yoy: {} },
-    quarterly: { labels: [], series: {}, qoq: {}, qoqReason: {}, yoy: {} },
+    monthly: { labels: [], series: {}, mom: {}, momReason: {}, momNote: {}, yoy: {}, yoyNote: {} },
+    quarterly: { labels: [], series: {}, qoq: {}, qoqReason: {}, qoqNote: {}, yoy: {}, yoyNote: {} },
     priceBasis: {
       timeline: { segments: [], changes: [], currentBasis: null },
       currentBasis: null,
